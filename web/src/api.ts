@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.DEV ? '' : '/api';
+const API_BASE = '';
 
 export async function apiFetch(path: string, options: RequestInit = {}) {
   const token = localStorage.getItem('token');
