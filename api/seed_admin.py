@@ -18,7 +18,7 @@ if existing:
 else:
     conn.execute(
         "INSERT INTO users (email, password_hash, display_name, is_admin) VALUES (?, ?, ?, 1)",
-        (EMAIL, generate_password_hash(PASSWORD), DISPLAY_NAME),
+        (EMAIL, generate_password_hash(PASSWORD, method="scrypt"), DISPLAY_NAME),
     )
     conn.commit()
     print(f"Created admin user: {EMAIL} / {PASSWORD}")

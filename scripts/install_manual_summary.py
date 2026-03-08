@@ -14,7 +14,15 @@ if str(ROOT) not in sys.path:
 from scripts.generate_outputs import generate_csv, generate_html, generate_markdown
 
 
-def install_summary_data(lesson: dict, lesson_path: Path, session_id: str, provider: str = "copilot-agent", model: str = "GPT-5.4") -> None:
+def install_summary_data(
+    lesson: dict,
+    lesson_path: Path,
+    session_id: str,
+    provider: str = "copilot-agent",
+    model: str = "GPT-5.4",
+    run_id: str | None = None,
+    user_id: int | None = None,
+) -> None:
     root = lesson_path.parents[3]
     out_dir = lesson_path.parent
 
@@ -25,16 +33,25 @@ def install_summary_data(lesson: dict, lesson_path: Path, session_id: str, provi
     db_path = root / "api" / "lessonlens.db"
     conn = sqlite3.connect(db_path)
     try:
+        conditions = ["s.session_id = ?"]
+        params: list[object] = [session_id]
+        if run_id is not None:
+            conditions.append("s.run_id = ?")
+            params.append(run_id)
+        if user_id is not None:
+            conditions.append("pr.user_id = ?")
+            params.append(user_id)
+
         row = conn.execute(
-            """
+            f"""
             select s.id, s.run_id, pr.user_id
             from sessions s
             join parse_runs pr on s.run_id = pr.run_id
-            where s.session_id = ?
+            where {' and '.join(conditions)}
             order by s.id desc
             limit 1
             """,
-            (session_id,),
+            tuple(params),
         ).fetchone()
         if row is None:
             raise SystemExit(f"session row not found for {session_id}")

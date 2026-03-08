@@ -9,11 +9,14 @@ Provides REST endpoints for:
   - Analytics events
 """
 import hashlib
+import io
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -317,6 +320,128 @@ def init_db():
     conn.close()
 
 
+COMMON_WEAK_PASSWORDS = {
+    "password",
+    "password123",
+    "123456789",
+    "1234567890",
+    "qwertyuiop",
+    "adminpassword1",
+    "letmein",
+}
+
+
+def validate_password_strength(password, email="", display_name=""):
+    errors = []
+    if not password:
+        return ["Password is required"]
+    if len(password) < 16:
+        errors.append("Password must be at least 16 characters")
+    if len(password) > 256:
+        errors.append("Password must be 256 characters or fewer")
+
+    lowered = password.casefold()
+    if lowered in COMMON_WEAK_PASSWORDS:
+        errors.append("Password is too common; use a password manager-generated password or a long unique passphrase")
+    if password.isdigit():
+        errors.append("Password cannot be only numbers")
+    if len(set(password)) < 4:
+        errors.append("Password is too repetitive")
+
+    personal_tokens = set()
+    for source in (email, display_name):
+        for token in re.split(r"[^a-z0-9]+", source.casefold()):
+            if len(token) >= 3:
+                personal_tokens.add(token)
+    for token in sorted(personal_tokens):
+        if token in lowered:
+            errors.append("Password cannot contain your email or display name")
+            break
+
+    return errors
+
+
+def _password_hash(password):
+    return generate_password_hash(password, method="scrypt")
+
+
+def _load_user(conn, email):
+    return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+
+
+def _delete_user_learning_data(conn, user_id):
+    run_ids = [row["run_id"] for row in conn.execute(
+        "SELECT run_id FROM parse_runs WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()]
+
+    conn.execute("DELETE FROM lesson_summaries WHERE user_id = ?", (user_id,))
+    if run_ids:
+        placeholders = ",".join("?" for _ in run_ids)
+        conn.execute(f"DELETE FROM sessions WHERE run_id IN ({placeholders})", tuple(run_ids))
+    conn.execute("DELETE FROM parse_runs WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM uploads WHERE user_id = ?", (user_id,))
+
+
+def _normalize_backup_member(name):
+    normalized = name.replace("\\", "/").lstrip("/")
+    if not normalized or normalized.startswith("../") or "/../" in normalized:
+        raise ValueError("Backup contains an invalid file path")
+    return normalized
+
+
+def _read_backup_json(zip_file, name):
+    try:
+        return json.loads(zip_file.read(name).decode("utf-8"))
+    except KeyError as exc:
+        raise ValueError(f"Backup is missing {name}") from exc
+    except Exception as exc:
+        raise ValueError(f"Backup file {name} must be valid UTF-8 JSON") from exc
+
+
+def _write_backup_member(destination_root, member_name, data):
+    relative = member_name.split("/", 1)[1]
+    destination = Path(destination_root) / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+
+
+def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
+    return {
+        "schema_version": "lessonlens-backup.v1",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "source_user": {
+            "email": user["email"],
+            "display_name": user["display_name"],
+        },
+        "latest_run": {
+            "run_id": run["run_id"],
+            "completed_at": run["completed_at"],
+            "session_count": run["session_count"],
+            "message_count": run["message_count"],
+            "lesson_content_count": run["lesson_content_count"],
+            "upload": {
+                "original_filename": upload["original_filename"] if upload else None,
+                "stored_filename": upload["stored_filename"] if upload else None,
+                "file_size": upload["file_size"] if upload else None,
+                "line_count": upload["line_count"] if upload else None,
+                "uploaded_at": upload["uploaded_at"] if upload else None,
+            },
+        },
+        "session_count": len(sessions_payload.get("sessions", [])),
+        "summary_count": len(summaries),
+        "summaries": [
+            {
+                "session_id": row["session_id"],
+                "provider": row["provider"],
+                "model": row["model"],
+                "created_at": row["created_at"],
+            }
+            for row in summaries
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
@@ -331,8 +456,9 @@ def register():
 
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
-    if len(password) < 12:
-        return jsonify({"error": "Password must be at least 12 characters"}), 400
+    password_errors = validate_password_strength(password, email=email, display_name=display_name)
+    if password_errors:
+        return jsonify({"error": password_errors[0], "errors": password_errors}), 400
 
     conn = get_db()
     try:
@@ -353,7 +479,7 @@ def register():
 
         conn.execute(
             "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
-            (email, generate_password_hash(password), display_name),
+            (email, _password_hash(password), display_name),
         )
         conn.execute(
             "UPDATE invitation_tokens SET used_at = ? WHERE id = ?",
@@ -388,6 +514,54 @@ def login():
         conn.close()
 
 
+@app.route("/api/change-password", methods=["POST"])
+@jwt_required()
+@rate_limit(max_requests=5, window_seconds=900)
+def change_password():
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    current_password = data.get("current_password", "")
+    new_password = data.get("new_password", "")
+    confirm_password = data.get("confirm_password", "")
+
+    if not current_password or not new_password or not confirm_password:
+        return jsonify({"error": "Current password, new password, and confirmation are required"}), 400
+    if new_password != confirm_password:
+        return jsonify({"error": "New password confirmation does not match"}), 400
+    if current_password == new_password:
+        return jsonify({"error": "New password must be different from the current password"}), 400
+
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not check_password_hash(user["password_hash"], current_password):
+            return jsonify({"error": "Current password is incorrect"}), 401
+
+        password_errors = validate_password_strength(
+            new_password,
+            email=user["email"],
+            display_name=user["display_name"] or "",
+        )
+        if password_errors:
+            return jsonify({"error": password_errors[0], "errors": password_errors}), 400
+
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (_password_hash(new_password), user["id"]),
+        )
+        conn.commit()
+
+        _track_event(conn, user["id"], "change_password", {})
+        return jsonify({
+            "message": "Password changed successfully",
+            "password_requirements": "Use a password manager-generated password or a unique passphrase of at least 16 characters.",
+        })
+    finally:
+        conn.close()
+
+
 @app.route("/api/profile", methods=["GET"])
 @jwt_required()
 def profile():
@@ -402,6 +576,262 @@ def profile():
             "display_name": user["display_name"],
             "is_admin": bool(user["is_admin"]),
         })
+    finally:
+        conn.close()
+
+
+@app.route("/api/backup/export", methods=["GET"])
+@jwt_required()
+def export_backup():
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No parsed data to export"}), 404
+
+        output_dir = Path(run["output_dir"])
+        sessions_path = output_dir / "sessions.json"
+        if not sessions_path.is_file():
+            return jsonify({"error": "Sessions artifact not found for latest run"}), 404
+
+        sessions_payload = json.loads(sessions_path.read_text(encoding="utf-8"))
+        upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (run["upload_id"],)).fetchone()
+        summaries = conn.execute(
+            "SELECT session_id, provider, model, lesson_data_json, created_at FROM lesson_summaries WHERE user_id = ? AND run_id = ? ORDER BY session_id ASC",
+            (user["id"], run["run_id"]),
+        ).fetchall()
+
+        manifest = _build_backup_manifest(user, run, upload, sessions_payload, summaries)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+            for artifact_name in ("sessions.json", "parse_report.json", "diagnostics.txt", "normalized_messages.jsonl"):
+                artifact_path = output_dir / artifact_name
+                if artifact_path.is_file():
+                    archive.writestr(f"parse/{artifact_name}", artifact_path.read_bytes())
+
+            if upload:
+                raw_path = Path(app.config["UPLOAD_FOLDER"]) / upload["stored_filename"]
+                if raw_path.is_file():
+                    backup_name = secure_filename(upload["original_filename"] or "line-export.txt") or "line-export.txt"
+                    archive.writestr(f"raw-exports/{backup_name}", raw_path.read_bytes())
+
+            for summary in summaries:
+                archive.writestr(
+                    f"summaries/{summary['session_id']}.json",
+                    json.dumps(json.loads(summary["lesson_data_json"]), ensure_ascii=False, indent=2),
+                )
+
+        buffer.seek(0)
+        filename = f"lessonlens-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
+        return send_file(
+            buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=filename,
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/backup/import", methods=["POST"])
+@jwt_required()
+def import_backup():
+    email = get_jwt_identity()
+    replace_existing = request.form.get("replace_existing", "true").lower() not in {"0", "false", "no"}
+
+    if "file" not in request.files:
+        return jsonify({"error": "No backup file provided"}), 400
+
+    uploaded = request.files["file"]
+    if not uploaded.filename:
+        return jsonify({"error": "No backup file selected"}), 400
+
+    raw_zip = uploaded.read()
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw_zip))
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Backup file must be a valid .zip archive"}), 400
+
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        with archive:
+            manifest = _read_backup_json(archive, "manifest.json")
+            if manifest.get("schema_version") != "lessonlens-backup.v1":
+                return jsonify({"error": "Unsupported backup schema"}), 400
+
+            sessions_payload = _read_backup_json(archive, "parse/sessions.json")
+            sessions = sessions_payload.get("sessions") or []
+            if not isinstance(sessions, list) or not sessions:
+                return jsonify({"error": "Backup does not contain any sessions"}), 400
+
+            parse_members = []
+            summary_payloads = {}
+            raw_export_member = None
+            for name in archive.namelist():
+                normalized = _normalize_backup_member(name)
+                if normalized.startswith("parse/") and not normalized.endswith("/"):
+                    parse_members.append(normalized)
+                elif normalized.startswith("summaries/") and normalized.endswith(".json"):
+                    session_id = Path(normalized).stem
+                    summary_payloads[session_id] = json.loads(archive.read(name).decode("utf-8"))
+                elif normalized.startswith("raw-exports/") and not normalized.endswith("/") and raw_export_member is None:
+                    raw_export_member = normalized
+
+            if replace_existing:
+                _delete_user_learning_data(conn, user["id"])
+                conn.commit()
+
+            os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+            os.makedirs(app.config["PROCESSED_FOLDER"], exist_ok=True)
+            os.makedirs(app.config["SUMMARIES_FOLDER"], exist_ok=True)
+
+            if raw_export_member:
+                raw_export_bytes = archive.read(raw_export_member)
+                original_filename = Path(raw_export_member).name
+            else:
+                raw_export_bytes = b""
+                original_filename = "imported-backup.txt"
+
+            stored_filename = f"{uuid.uuid4()}.txt"
+            upload_path = Path(app.config["UPLOAD_FOLDER"]) / stored_filename
+            upload_path.write_bytes(raw_export_bytes)
+            file_hash = hashlib.sha256(raw_export_bytes).hexdigest()
+            line_count = len(raw_export_bytes.decode("utf-8", errors="replace").splitlines())
+            file_size = len(raw_export_bytes)
+
+            upload_row = conn.execute(
+                "INSERT INTO uploads (user_id, original_filename, stored_filename, file_hash, file_size, line_count) VALUES (?, ?, ?, ?, ?, ?)",
+                (user["id"], original_filename, stored_filename, file_hash, file_size, line_count),
+            )
+            upload_id = upload_row.lastrowid
+
+            import_run_id = datetime.now(timezone.utc).strftime("imported-%Y%m%d-%H%M%S")
+            import_output_dir = Path(app.config["PROCESSED_FOLDER"]) / import_run_id
+            import_output_dir.mkdir(parents=True, exist_ok=True)
+
+            for member_name in parse_members:
+                _write_backup_member(import_output_dir, member_name, archive.read(member_name))
+
+            if not (import_output_dir / "sessions.json").is_file():
+                (import_output_dir / "sessions.json").write_text(
+                    json.dumps(sessions_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+            session_count = 0
+            total_messages = 0
+            total_lesson_messages = 0
+            for session in sessions:
+                if session.get("message_count", 0) == 0:
+                    continue
+                session_count += 1
+                total_messages += session.get("message_count", 0)
+                total_lesson_messages += session.get("lesson_content_count", 0)
+
+            completed_at = manifest.get("latest_run", {}).get("completed_at") or datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """INSERT INTO parse_runs
+                   (run_id, upload_id, user_id, status, session_count, message_count,
+                    lesson_content_count, output_dir, completed_at)
+                   VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?)""",
+                (
+                    import_run_id,
+                    upload_id,
+                    user["id"],
+                    session_count,
+                    total_messages,
+                    total_lesson_messages,
+                    str(import_output_dir),
+                    completed_at,
+                ),
+            )
+
+            for session in sessions:
+                if session.get("message_count", 0) == 0:
+                    continue
+                conn.execute(
+                    """INSERT INTO sessions
+                       (run_id, session_id, date, start_time, end_time,
+                        message_count, lesson_content_count, boundary_confidence, topics_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        import_run_id,
+                        session["session_id"],
+                        session["date"],
+                        session.get("start_time"),
+                        session.get("end_time"),
+                        session.get("message_count", 0),
+                        session.get("lesson_content_count", 0),
+                        session.get("boundary_confidence", "medium"),
+                        json.dumps(session.get("topics", []), ensure_ascii=False),
+                    ),
+                )
+            conn.commit()
+
+            import sys as _sys
+            scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+            if scripts_dir not in _sys.path:
+                _sys.path.insert(0, scripts_dir)
+            from install_manual_summary import install_summary_data
+
+            summary_metadata = {
+                item["session_id"]: item
+                for item in manifest.get("summaries", [])
+                if item.get("session_id")
+            }
+
+            imported_summaries = 0
+            for session_id, lesson_data in summary_payloads.items():
+                if lesson_data.get("schema_version") != "lesson-data.v1":
+                    continue
+                if not conn.execute(
+                    "SELECT 1 FROM sessions WHERE run_id = ? AND session_id = ?",
+                    (import_run_id, session_id),
+                ).fetchone():
+                    continue
+
+                summary_dir = Path(app.config["SUMMARIES_FOLDER"]) / import_run_id / session_id
+                summary_dir.mkdir(parents=True, exist_ok=True)
+                lesson_path = summary_dir / "lesson-data.json"
+                lesson_path.write_text(json.dumps(lesson_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                meta = summary_metadata.get(session_id, {})
+                install_summary_data(
+                    lesson_data,
+                    lesson_path,
+                    session_id,
+                    provider=meta.get("provider") or "imported-backup",
+                    model=meta.get("model") or "external-agent",
+                    run_id=import_run_id,
+                    user_id=user["id"],
+                )
+                imported_summaries += 1
+
+            _track_event(conn, user["id"], "import_backup", {
+                "session_count": session_count,
+                "summary_count": imported_summaries,
+                "replace_existing": replace_existing,
+            })
+
+            return jsonify({
+                "message": "Backup imported successfully",
+                "session_count": session_count,
+                "summary_count": imported_summaries,
+                "replace_existing": replace_existing,
+            }), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     finally:
         conn.close()
 
@@ -884,7 +1314,15 @@ def import_summary(session_id):
 
         provider = request.form.get("provider", "uploaded-summary")
         model = request.form.get("model", "external-agent")
-        install_summary_data(lesson_data, lesson_path, session_id, provider=provider, model=model)
+        install_summary_data(
+            lesson_data,
+            lesson_path,
+            session_id,
+            provider=provider,
+            model=model,
+            run_id=run["run_id"],
+            user_id=user["id"],
+        )
 
         _track_event(conn, user["id"], "import_summary", {
             "session_id": session_id,

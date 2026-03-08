@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { apiFetch, apiJson } from '../api';
+import { useAuth } from '../AuthContext';
 
 type Provider = 'openai' | 'anthropic' | 'gemini';
 
@@ -11,34 +12,47 @@ function getStoredProvider(): Provider {
 }
 
 export default function SettingsPage() {
+  const { user } = useAuth();
   const [provider, setProvider] = useState<Provider>(getStoredProvider);
   const [sessionId, setSessionId] = useState('');
-  const [status, setStatus] = useState('');
-  const [error, setError] = useState('');
-  const [importing, setImporting] = useState(false);
+  const [providerStatus, setProviderStatus] = useState('');
+  const [sessionImportFile, setSessionImportFile] = useState<File | null>(null);
+  const [sessionImportStatus, setSessionImportStatus] = useState('');
+  const [sessionImportError, setSessionImportError] = useState('');
+  const [importingSummary, setImportingSummary] = useState(false);
   const [bulkGenerating, setBulkGenerating] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
   const [bulkError, setBulkError] = useState('');
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [importingBackup, setImportingBackup] = useState(false);
+  const [backupStatus, setBackupStatus] = useState('');
+  const [backupError, setBackupError] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordStatus, setPasswordStatus] = useState('');
+  const [passwordError, setPasswordError] = useState('');
 
   const saveProvider = (next: Provider) => {
     setProvider(next);
     localStorage.setItem(STORAGE_KEY, next);
-    setStatus(`Default provider saved: ${next}`);
-    setError('');
+    setProviderStatus(`Default provider saved: ${next}`);
   };
 
-  const handleImport = async (file: File | null) => {
-    if (!file || !sessionId.trim()) {
-      setError('Select a lesson-data.json file and enter a session ID first.');
+  const handleImportSummary = async () => {
+    if (!sessionImportFile || !sessionId.trim()) {
+      setSessionImportError('Select a lesson-data.json file and enter a session ID first.');
       return;
     }
 
-    setImporting(true);
-    setError('');
-    setStatus('');
+    setImportingSummary(true);
+    setSessionImportError('');
+    setSessionImportStatus('');
     try {
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', sessionImportFile);
       formData.append('provider', 'uploaded-summary');
       formData.append('model', 'external-agent');
       const res = await apiFetch(`/api/sessions/${sessionId.trim()}/summary/import`, {
@@ -49,11 +63,112 @@ export default function SettingsPage() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Import failed');
       }
-      setStatus(`Imported summary package for ${sessionId.trim()}.`);
+      setSessionImportStatus(`Imported summary package for ${sessionId.trim()}.`);
+      setSessionImportFile(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Import failed');
+      setSessionImportError(err instanceof Error ? err.message : 'Import failed');
     } finally {
-      setImporting(false);
+      setImportingSummary(false);
+    }
+  };
+
+  const handleBackupExport = async () => {
+    setExportingBackup(true);
+    setBackupError('');
+    setBackupStatus('');
+    try {
+      const res = await apiFetch('/api/backup/export');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Backup export failed');
+      }
+
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^\"]+)"?/);
+      const filename = match?.[1] || 'lessonlens-backup.zip';
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setBackupStatus('Backup exported successfully. Keep the .zip file somewhere safe.');
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : 'Backup export failed');
+    } finally {
+      setExportingBackup(false);
+    }
+  };
+
+  const handleBackupImport = async () => {
+    if (!backupFile) {
+      setBackupError('Choose a backup .zip file first.');
+      return;
+    }
+
+    setImportingBackup(true);
+    setBackupError('');
+    setBackupStatus('');
+    try {
+      const formData = new FormData();
+      formData.append('file', backupFile);
+      formData.append('replace_existing', 'true');
+      const res = await apiFetch('/api/backup/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Backup import failed');
+      }
+      setBackupStatus(`Imported ${data.session_count ?? 0} sessions and ${data.summary_count ?? 0} summaries into this account.`);
+      setBackupFile(null);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : 'Backup import failed');
+    } finally {
+      setImportingBackup(false);
+    }
+  };
+
+  const handlePasswordChange = async (e: FormEvent) => {
+    e.preventDefault();
+    setPasswordError('');
+    setPasswordStatus('');
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setPasswordError('Fill in all password fields.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('New password confirmation does not match.');
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setPasswordError('New password must be different from the current password.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const result = await apiJson<{ message: string }>('/api/change-password', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+          confirm_password: confirmPassword,
+        }),
+      });
+      setPasswordStatus(result.message);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : 'Password change failed');
+    } finally {
+      setChangingPassword(false);
     }
   };
 
@@ -130,6 +245,113 @@ export default function SettingsPage() {
             Gemini
           </button>
         </div>
+        {providerStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{providerStatus}</div>}
+      </section>
+
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Account Security</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Change the password for <span className="text-gray-200">{user?.email}</span>. Best practice is a password manager-generated secret or a unique passphrase with at least 16 characters.
+          </p>
+        </div>
+
+        <form className="space-y-4" onSubmit={handlePasswordChange}>
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">Current password</span>
+            <input
+              type="password"
+              value={currentPassword}
+              onChange={e => setCurrentPassword(e.target.value)}
+              autoComplete="current-password"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">New password</span>
+            <input
+              type="password"
+              value={newPassword}
+              onChange={e => setNewPassword(e.target.value)}
+              autoComplete="new-password"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">Confirm new password</span>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
+              autoComplete="new-password"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <p className="text-xs text-gray-500">
+            The app rejects short, common, repetitive, or personally-derived passwords and stores the new hash with a stronger password hashing method.
+          </p>
+
+          <button
+            type="submit"
+            disabled={changingPassword}
+            className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {changingPassword ? 'Updating password...' : 'Change Password'}
+          </button>
+        </form>
+
+        {passwordStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{passwordStatus}</div>}
+        {passwordError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{passwordError}</div>}
+      </section>
+
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Backup and Restore</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Export the current parsed dataset and imported/generated summaries from local, then restore that backup into the live app. Restoring replaces the current parsed data and summaries for this account.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={() => void handleBackupExport()}
+            disabled={exportingBackup}
+            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {exportingBackup ? 'Preparing backup...' : 'Download Full Backup'}
+          </button>
+        </div>
+
+        <div className="border-t border-gray-800 pt-4 space-y-3">
+          <label className="block">
+            <span className="text-sm text-gray-300 block mb-2">Restore backup .zip</span>
+            <input
+              type="file"
+              accept="application/zip,.zip"
+              className="block w-full text-sm text-gray-400 file:mr-4 file:rounded-lg file:border-0 file:bg-gray-800 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-gray-700"
+              onChange={e => setBackupFile(e.target.files?.[0] ?? null)}
+              disabled={importingBackup}
+            />
+          </label>
+
+          <button
+            onClick={() => void handleBackupImport()}
+            disabled={importingBackup || !backupFile}
+            className="w-full sm:w-auto bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {importingBackup ? 'Restoring backup...' : 'Restore Backup Into This Account'}
+          </button>
+
+          <p className="text-xs text-gray-500">
+            Use this to move your local sessions and summaries into production. The backup does not include your password hash.
+          </p>
+        </div>
+
+        {backupStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{backupStatus}</div>}
+        {backupError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{backupError}</div>}
       </section>
 
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
@@ -181,14 +403,21 @@ export default function SettingsPage() {
             type="file"
             accept="application/json,.json"
             className="block w-full text-sm text-gray-400 file:mr-4 file:rounded-lg file:border-0 file:bg-gray-800 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-gray-700"
-            onChange={e => void handleImport(e.target.files?.[0] ?? null)}
-            disabled={importing}
+            onChange={e => setSessionImportFile(e.target.files?.[0] ?? null)}
+            disabled={importingSummary}
           />
         </label>
 
-        {status && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{status}</div>}
-        {error && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{error}</div>}
-        {importing && <p className="text-xs text-gray-500">Importing summary package...</p>}
+        <button
+          onClick={() => void handleImportSummary()}
+          disabled={importingSummary || !sessionImportFile || !sessionId.trim()}
+          className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+        >
+          {importingSummary ? 'Importing summary package...' : 'Import Summary Package'}
+        </button>
+
+        {sessionImportStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{sessionImportStatus}</div>}
+        {sessionImportError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{sessionImportError}</div>}
       </section>
     </div>
   );
