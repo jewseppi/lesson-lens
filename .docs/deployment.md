@@ -37,10 +37,10 @@ Add these repository secrets:
 - `HOST`: SSH host
 - `USERNAME`: SSH username
 - `SSH_PRIVATE_KEY`: private key used for deployment access
-- `APP_ROOT`: absolute application root on the server, for example `/home/USERNAME/public_html/api/lens`
+- `PASSENGER_APP_ROOT`: absolute application root on the server, for example `/home/USERNAME/public_html/api/lens`
 - `PASSENGER_PYTHON_PATH`: absolute path to the Python virtualenv root on the server
 
-The workflow uploads the repo to `<APP_ROOT>/`, builds the frontend,
+The workflow uploads the repo to `<PASSENGER_APP_ROOT>/`, builds the frontend,
 installs Python requirements, initializes the SQLite schema, writes `.htaccess`,
 and restarts the Python app.
 

@@ -47,7 +47,7 @@ jobs:
             --exclude "summaries" \
             --exclude "flashcards" \
             --exclude "html" \
-            ./ "${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.APP_ROOT }}/"
+            ./ "${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.PASSENGER_APP_ROOT }}/"
 
       - name: Install dependencies and restart Passenger
         uses: appleboy/ssh-action@v1.0.0
@@ -58,7 +58,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            APP_ROOT="${{ secrets.APP_ROOT }}"
+            APP_ROOT="${{ secrets.PASSENGER_APP_ROOT }}"
             API_ROOT="$APP_ROOT/api"
             PYTHON_ROOT="${{ secrets.PASSENGER_PYTHON_PATH }}"
 
