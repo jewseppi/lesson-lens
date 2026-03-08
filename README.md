@@ -52,14 +52,14 @@ Provider selection also lives in the Settings page.
 The Settings page also includes a bulk action to generate summaries for all
 parsed sessions that do not already have one.
 
-## GoDaddy Deployment
+## Deployment
 
-This app can be deployed the same basic way as xlsvc on shared hosting with
-Passenger.
+This app can be deployed as a single Flask application that also serves the
+built React frontend.
 
 Recommended production shape:
 
-- `language/api/` runs the Flask app under Passenger
+- `language/api/` runs the Flask app
 - `language/web/dist/` contains the built React frontend
 - Flask serves the built frontend and the `/api/*` routes from the same domain
 - SQLite stays as `api/lessonlens.db`
@@ -70,12 +70,12 @@ For deployment:
 
 1. Build the frontend with `npm run build` in `web/`
 2. Install Python dependencies from `api/requirements.txt`
-3. Run Passenger with `api/passenger_wsgi.py`
+3. Run the Flask app with your WSGI entrypoint, such as `api/passenger_wsgi.py`
 4. Initialize the database with `python -c "from app import init_db; init_db()"`
 5. Ensure `api/`, `raw-exports/`, `processed/`, and `summaries/` are writable by the app user
 
-The Flask app now serves the built SPA directly, so you can point a single app
-at a single domain such as `lens.jsilverman.ca`.
+The Flask app serves the built SPA directly, so one deployment can handle both
+the frontend and the API.
 
 ## Launch Modes
 
