@@ -5,6 +5,8 @@ import { useAuth } from '../AuthContext';
 type Provider = 'openai' | 'anthropic' | 'gemini';
 
 const STORAGE_KEY = 'lessonlens-provider';
+const REMOTE_URL_KEY = 'lessonlens-remote-url';
+const REMOTE_EMAIL_KEY = 'lessonlens-remote-email';
 
 function getStoredProvider(): Provider {
   const value = localStorage.getItem(STORAGE_KEY);
@@ -28,6 +30,12 @@ export default function SettingsPage() {
   const [importingBackup, setImportingBackup] = useState(false);
   const [backupStatus, setBackupStatus] = useState('');
   const [backupError, setBackupError] = useState('');
+  const [remoteBaseUrl, setRemoteBaseUrl] = useState(() => localStorage.getItem(REMOTE_URL_KEY) || '');
+  const [remoteEmail, setRemoteEmail] = useState(() => localStorage.getItem(REMOTE_EMAIL_KEY) || (user?.email ?? ''));
+  const [remotePassword, setRemotePassword] = useState('');
+  const [syncingRemote, setSyncingRemote] = useState(false);
+  const [remoteSyncStatus, setRemoteSyncStatus] = useState('');
+  const [remoteSyncError, setRemoteSyncError] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -130,6 +138,43 @@ export default function SettingsPage() {
       setBackupError(err instanceof Error ? err.message : 'Backup import failed');
     } finally {
       setImportingBackup(false);
+    }
+  };
+
+  const handleRemoteSync = async () => {
+    if (!remoteBaseUrl.trim() || !remoteEmail.trim() || !remotePassword) {
+      setRemoteSyncError('Enter the remote URL, remote email, and remote password first.');
+      return;
+    }
+
+    setSyncingRemote(true);
+    setRemoteSyncError('');
+    setRemoteSyncStatus('');
+
+    localStorage.setItem(REMOTE_URL_KEY, remoteBaseUrl.trim());
+    localStorage.setItem(REMOTE_EMAIL_KEY, remoteEmail.trim());
+
+    try {
+      const result = await apiJson<{
+        message: string;
+        session_count: number;
+        summary_count: number;
+        remote_base_url: string;
+      }>('/api/backup/sync-remote', {
+        method: 'POST',
+        body: JSON.stringify({
+          remote_base_url: remoteBaseUrl.trim(),
+          remote_email: remoteEmail.trim(),
+          remote_password: remotePassword,
+          replace_existing: true,
+        }),
+      });
+      setRemoteSyncStatus(`${result.message}. Synced ${result.session_count} sessions and ${result.summary_count} summaries to ${result.remote_base_url}.`);
+      setRemotePassword('');
+    } catch (err) {
+      setRemoteSyncError(err instanceof Error ? err.message : 'Remote sync failed');
+    } finally {
+      setSyncingRemote(false);
     }
   };
 
@@ -352,6 +397,63 @@ export default function SettingsPage() {
 
         {backupStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{backupStatus}</div>}
         {backupError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{backupError}</div>}
+
+        <div className="border-t border-gray-800 pt-4 space-y-4">
+          <div>
+            <h3 className="text-base font-semibold text-white">Sync to Another LessonLens</h3>
+            <p className="text-sm text-gray-400 mt-1">
+              One-click alternative to download + restore. This sends your latest parsed data and summaries directly into another LessonLens instance.
+            </p>
+          </div>
+
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">Remote app URL</span>
+            <input
+              type="url"
+              value={remoteBaseUrl}
+              onChange={e => setRemoteBaseUrl(e.target.value)}
+              placeholder="https://lens.jsilverman.ca"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">Remote account email</span>
+            <input
+              type="email"
+              value={remoteEmail}
+              onChange={e => setRemoteEmail(e.target.value)}
+              placeholder="admin@example.com"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block space-y-2">
+            <span className="text-sm text-gray-300">Remote account password</span>
+            <input
+              type="password"
+              value={remotePassword}
+              onChange={e => setRemotePassword(e.target.value)}
+              autoComplete="current-password"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <button
+            onClick={() => void handleRemoteSync()}
+            disabled={syncingRemote}
+            className="w-full sm:w-auto bg-cyan-600 hover:bg-cyan-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {syncingRemote ? 'Syncing to remote...' : 'Sync Local Data To Remote'}
+          </button>
+
+          <p className="text-xs text-gray-500">
+            This logs into the remote LessonLens account, uploads a backup in one step, and replaces the remote parsed sessions and summaries for that account.
+          </p>
+
+          {remoteSyncStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{remoteSyncStatus}</div>}
+          {remoteSyncError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{remoteSyncError}</div>}
+        </div>
       </section>
 
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">

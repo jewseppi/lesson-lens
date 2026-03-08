@@ -26,22 +26,22 @@ export default function SessionDetailPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <Link to="/sessions" className="text-indigo-400 hover:text-indigo-300 text-sm">← Sessions</Link>
           <h1 className="text-2xl font-bold mt-1">{session.date}</h1>
-          <p className="text-gray-400">{session.start_time}–{session.end_time} · {session.message_count} messages · {session.lesson_content_count} lesson content</p>
+          <p className="text-sm text-gray-400 sm:text-base">{session.start_time}–{session.end_time} · {session.message_count} messages · {session.lesson_content_count} lesson content</p>
         </div>
-        <div className="flex gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:self-start">
           <Link
             to={`/sessions/${sessionId}/summary`}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors text-center"
           >
             View Summary
           </Link>
           <Link
             to={`/sessions/${sessionId}/study`}
-            className="bg-green-700 hover:bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            className="bg-green-700 hover:bg-green-600 text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors text-center"
           >
             Study Mode
           </Link>
@@ -49,7 +49,7 @@ export default function SessionDetailPage() {
       </div>
 
       {/* Filter toggle */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <button
           onClick={() => setShowAll(!showAll)}
           className={`text-sm px-3 py-1 rounded-lg transition-colors ${
@@ -87,7 +87,7 @@ function MessageBubble({ message: m }: { message: Message }) {
 
   return (
     <div className={`bg-gray-900 border border-gray-800 border-l-4 ${typeColors[m.message_type] || 'border-l-gray-700'} rounded-lg p-3`}>
-      <div className="flex items-center gap-2 mb-1">
+      <div className="flex flex-wrap items-center gap-2 mb-1">
         <span className={`text-xs font-medium ${isTeacher ? 'text-cyan-400' : 'text-orange-400'}`}>
           {isTeacher ? '👩‍🏫 Teacher' : '🎓 Student'}
         </span>

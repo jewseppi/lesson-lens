@@ -113,7 +113,7 @@ export default function SummaryPage() {
   const { zhClass } = useFontSize();
 
   return (
-    <div className="max-w-3xl mx-auto space-y-8">
+    <div className="max-w-4xl mx-auto space-y-6 sm:space-y-8">
       <div>
         <Link to={`/sessions/${sessionId}`} className="text-indigo-400 hover:text-indigo-300 text-sm">← Session</Link>
         <h1 className="text-2xl font-bold mt-1">{summary.title}</h1>
@@ -151,7 +151,24 @@ export default function SummaryPage() {
       {summary.vocabulary.length > 0 && (
         <section>
           <h2 className="text-lg font-semibold mb-3 text-indigo-400">Vocabulary</h2>
-          <div className="overflow-x-auto">
+          <div className="md:hidden space-y-3">
+            {summary.vocabulary.map((v, i) => (
+              <div key={`${v.term_zh}-${i}-mobile`} className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className={`${zhClass} text-base`}>{v.term_zh}</div>
+                    <div className="pinyin-text mt-1">{v.pinyin}</div>
+                    {v.zhuyin && <div className="zhuyin-text mt-1">{v.zhuyin}</div>}
+                  </div>
+                  <PronunciationNote note={v.pronunciation_note} />
+                </div>
+                <div className="text-gray-300">{v.en}</div>
+                <div className="text-xs uppercase tracking-wide text-gray-500">{v.pos_or_type}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-gray-500 border-b border-gray-800">
@@ -235,16 +252,7 @@ export default function SummaryPage() {
         >
           🎯 Study This Lesson
         </Link>
-        <Link
-          to="/settings"
-          className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-6 py-3 rounded-lg font-medium transition-colors border border-gray-700"
-        >
-          ⬆ Update Summary JSON
-        </Link>
       </div>
-      <p className="text-sm text-gray-500">
-        To revise this lesson, upload a new lesson-data.json from Settings using Import Summary Package.
-      </p>
     </div>
   );
 }

@@ -29,10 +29,10 @@ export default function DashboardPage() {
       <h1 className="text-2xl font-bold">Dashboard</h1>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <StatCard label="Total Sessions" value={sessions.length} />
         <StatCard label="Lessons (3+ content)" value={totalLessons} />
-        <StatCard label="Summarized" value={summarized} />
+        <StatCard label="Summaries Total" value={summarized} />
         <StatCard label="Uploads" value={uploads.length} />
       </div>
 
@@ -55,7 +55,10 @@ export default function DashboardPage() {
       {/* Recent sessions */}
       {recentSessions.length > 0 && (
         <div>
-          <h2 className="text-lg font-semibold mb-3">Recent Sessions</h2>
+          <div className="flex flex-col gap-1 mb-3 sm:flex-row sm:items-baseline sm:justify-between">
+            <h2 className="text-lg font-semibold">Recent Sessions</h2>
+            <p className="text-sm text-gray-500">Showing the latest 5 sessions</p>
+          </div>
           <div className="space-y-2">
             {recentSessions.map(s => (
               <Link
@@ -63,12 +66,12 @@ export default function DashboardPage() {
                 to={`/sessions/${s.session_id}`}
                 className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-indigo-600 transition-colors"
               >
-                <div className="flex justify-between items-center">
-                  <div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
+                  <div className="min-w-0">
                     <span className="font-medium">{s.date}</span>
-                    <span className="text-gray-400 ml-2 text-sm">{s.start_time}–{s.end_time}</span>
+                    <span className="block text-gray-400 text-sm sm:inline sm:ml-2">{s.start_time}–{s.end_time}</span>
                   </div>
-                  <div className="flex items-center gap-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2 text-sm sm:justify-end">
                     <span className="text-gray-400">{s.lesson_content_count} lesson msgs</span>
                     {s.has_summary && (
                       <span className="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">Summarized</span>

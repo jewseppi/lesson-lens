@@ -38,31 +38,44 @@ export default function StudyModePage() {
   ];
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6 mobile-safe-bottom">
       <div>
         <Link to={`/sessions/${sessionId}/summary`} className="text-indigo-400 hover:text-indigo-300 text-sm">← Summary</Link>
-        <h1 className="text-2xl font-bold mt-1">🎯 Study Mode</h1>
-        <p className="text-gray-400">{summary.lesson_date} — {summary.title}</p>
+        <h1 className="text-xl font-bold mt-1 sm:text-2xl">🎯 Study Mode</h1>
+        <p className="text-sm text-gray-400 sm:text-base">{summary.lesson_date} — {summary.title}</p>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-gray-900 p-1 rounded-lg">
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
-              tab === t.id
-                ? 'bg-indigo-600 text-white'
-                : 'text-gray-400 hover:text-white hover:bg-gray-800'
-            }`}
+      <div className="space-y-3">
+        <div className="sm:hidden">
+          <label className="block text-xs uppercase tracking-wide text-gray-500 mb-2">Study mode</label>
+          <select
+            value={tab}
+            onChange={e => setTab(e.target.value as StudyTab)}
+            className="study-select w-full rounded-lg border border-gray-700 px-4 py-3 text-sm text-white focus:outline-none focus:border-indigo-500"
           >
-            {t.label} ({t.count})
-          </button>
-        ))}
+            {tabs.map(t => (
+              <option key={t.id} value={t.id}>{t.label} ({t.count})</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="hidden sm:grid sm:grid-cols-4 gap-2 bg-gray-900 p-1 rounded-lg">
+          {tabs.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                tab === t.id
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800'
+              }`}
+            >
+              {t.label} ({t.count})
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Content */}
       {tab === 'flashcards' && <FlashcardDeck cards={summary.review?.flashcards || []} sessionId={sessionId!} />}
       {tab === 'quiz' && <QuizMode questions={summary.review?.quiz || []} sessionId={sessionId!} />}
       {tab === 'fill-blank' && <FillBlankMode items={summary.review?.fill_blank || []} sessionId={sessionId!} />}
@@ -71,9 +84,6 @@ export default function StudyModePage() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Flashcards
-// ---------------------------------------------------------------------------
 function FlashcardDeck({ cards, sessionId }: { cards: Flashcard[]; sessionId: string }) {
   const { zhClass } = useFontSize();
   const [index, setIndex] = useState(0);
@@ -83,76 +93,93 @@ function FlashcardDeck({ cards, sessionId }: { cards: Flashcard[]; sessionId: st
   if (cards.length === 0) return <p className="text-gray-400">No flashcards available.</p>;
 
   const card = cards[index];
-  const progress = Math.round(((known.size) / cards.length) * 100);
+  const progress = Math.round((known.size / cards.length) * 100);
 
   const next = (gotIt: boolean) => {
     if (gotIt) {
-      known.add(card.id);
-      setKnown(new Set(known));
+      const nextKnown = new Set(known);
+      nextKnown.add(card.id);
+      setKnown(nextKnown);
       trackEvent('flashcard_known', { session_id: sessionId, card_id: card.id });
     }
     setFlipped(false);
     setIndex((index + 1) % cards.length);
   };
 
-  return (
-    <div className="space-y-4">
-      {/* Progress */}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 bg-gray-800 rounded-full h-2">
-          <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${progress}%` }} />
-        </div>
-        <span className="text-sm text-gray-400">{known.size}/{cards.length}</span>
-      </div>
+  const previous = () => {
+    setFlipped(false);
+    setIndex((index - 1 + cards.length) % cards.length);
+  };
 
-      {/* Card */}
-      <div
-        onClick={() => setFlipped(!flipped)}
-        className="bg-gray-900 border border-gray-800 rounded-xl p-8 min-h-[200px] flex items-center justify-center cursor-pointer hover:border-indigo-600 transition-all"
-      >
-        <div className="text-center">
-          {flipped ? (
-            <div>
-              <div className="text-gray-300 text-lg">{card.back}</div>
-              {card.hint && <div className="text-gray-500 text-sm mt-2">Hint: {card.hint}</div>}
-            </div>
-          ) : (
-            <div className={`${zhClass} text-2xl`}>{card.front}</div>
-          )}
-          <div className="text-gray-600 text-xs mt-4">
-            {flipped ? 'Click to flip back' : 'Click to reveal'}
+  return (
+    <div className="space-y-3 sm:space-y-4">
+      <div className="rounded-xl border border-gray-800 bg-gray-900/70 p-3 sm:p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex-1 bg-gray-800 rounded-full h-2">
+            <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${progress}%` }} />
+          </div>
+          <div className="flex items-center justify-between text-sm text-gray-400 sm:justify-end sm:gap-3">
+            <span>{known.size}/{cards.length} known</span>
+            <span>Card {index + 1} of {cards.length}</span>
           </div>
         </div>
       </div>
 
-      {/* Controls */}
+      <div
+        onClick={() => setFlipped(value => !value)}
+        className="flashcard-shell bg-gray-900 border border-gray-800 rounded-2xl p-5 sm:p-8 flex items-center justify-center cursor-pointer hover:border-indigo-600 transition-all"
+      >
+        <div className="text-center w-full max-w-xl mx-auto">
+          {flipped ? (
+            <div>
+              <div className="text-gray-300 text-base leading-relaxed sm:text-lg">{card.back}</div>
+              {card.hint && <div className="text-gray-500 text-sm mt-3">Hint: {card.hint}</div>}
+            </div>
+          ) : (
+            <div className={`${zhClass} leading-relaxed break-words`}>{card.front}</div>
+          )}
+          <div className="text-gray-600 text-xs mt-4">
+            {flipped ? 'Tap the card or use Show Front' : 'Tap the card or use Reveal Answer'}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <button
+          onClick={previous}
+          className="bg-gray-800 hover:bg-gray-700 text-white py-3 rounded-lg font-medium transition-colors"
+        >
+          ← Previous
+        </button>
+        <button
+          onClick={() => setFlipped(value => !value)}
+          className="bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-lg font-medium transition-colors"
+        >
+          {flipped ? 'Show Front' : 'Reveal Answer'}
+        </button>
+        <div className="hidden sm:block" />
+      </div>
+
       {flipped && (
-        <div className="flex gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <button
             onClick={() => next(false)}
-            className="flex-1 bg-red-900/50 hover:bg-red-900 text-red-300 py-3 rounded-lg font-medium transition-colors"
+            className="bg-red-900/50 hover:bg-red-900 text-red-300 py-3 rounded-lg font-medium transition-colors"
           >
             ❌ Again
           </button>
           <button
             onClick={() => next(true)}
-            className="flex-1 bg-green-900/50 hover:bg-green-900 text-green-300 py-3 rounded-lg font-medium transition-colors"
+            className="bg-green-900/50 hover:bg-green-900 text-green-300 py-3 rounded-lg font-medium transition-colors"
           >
             ✅ Got it
           </button>
         </div>
       )}
-
-      <div className="text-center text-sm text-gray-600">
-        Card {index + 1} of {cards.length}
-      </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Quiz
-// ---------------------------------------------------------------------------
 function QuizMode({ questions, sessionId }: { questions: QuizQuestion[]; sessionId: string }) {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
@@ -195,13 +222,13 @@ function QuizMode({ questions, sessionId }: { questions: QuizQuestion[]; session
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-between text-sm text-gray-400">
+      <div className="flex flex-col gap-1 text-sm text-gray-400 sm:flex-row sm:justify-between">
         <span>Question {index + 1} of {questions.length}</span>
         <span>Score: {score}</span>
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <p className="text-lg font-medium mb-4">{q.question}</p>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 sm:p-6">
+        <p className="text-base font-medium mb-4 leading-relaxed sm:text-lg">{q.question}</p>
         <div className="space-y-2">
           {q.options.map((opt, i) => {
             let btnClass = 'bg-gray-800 border-gray-700 text-gray-300 hover:border-indigo-500';
@@ -246,9 +273,6 @@ function QuizMode({ questions, sessionId }: { questions: QuizQuestion[]; session
   );
 }
 
-// ---------------------------------------------------------------------------
-// Fill in the Blank
-// ---------------------------------------------------------------------------
 function FillBlankMode({ items, sessionId }: {
   items: Array<{ id: string; sentence: string; answer: string; hint?: string }>;
   sessionId: string;
@@ -279,8 +303,8 @@ function FillBlankMode({ items, sessionId }: {
     <div className="space-y-4">
       <div className="text-sm text-gray-400">{index + 1} of {items.length} · {correct} correct</div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <p className="text-lg mb-4 leading-relaxed">{item.sentence}</p>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 sm:p-6">
+        <p className="text-base mb-4 leading-relaxed sm:text-lg">{item.sentence}</p>
         {item.hint && <p className="text-sm text-gray-500 mb-3">Hint: {item.hint}</p>}
 
         <input
@@ -290,7 +314,7 @@ function FillBlankMode({ items, sessionId }: {
           onKeyDown={e => e.key === 'Enter' && !revealed && check()}
           placeholder="Type your answer..."
           disabled={revealed}
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-lg focus:outline-none focus:border-indigo-500"
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white text-base sm:text-lg focus:outline-none focus:border-indigo-500"
         />
 
         {revealed && (
@@ -313,9 +337,6 @@ function FillBlankMode({ items, sessionId }: {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Translation Drills
-// ---------------------------------------------------------------------------
 function TranslationMode({ drills, sessionId }: {
   drills: Array<{ id: string; source_lang: string; source_text: string; target_text: string; hint?: string }>;
   sessionId: string;
@@ -340,23 +361,23 @@ function TranslationMode({ drills, sessionId }: {
     <div className="space-y-4">
       <div className="text-sm text-gray-400">{index + 1} of {drills.length} · {selfScore} self-scored correct</div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center">
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center sm:p-6">
         <div className="text-xs text-gray-500 mb-2">
           Translate {isZhToEn ? 'Chinese → English' : 'English → Chinese'}
         </div>
-        <div className={`text-xl mb-4 ${isZhToEn ? 'zh-text' : ''}`}>
+        <div className={`text-lg mb-4 leading-relaxed sm:text-xl ${isZhToEn ? 'zh-text' : ''}`}>
           {drill.source_text}
         </div>
 
         {revealed ? (
           <div className="bg-gray-800 rounded-lg p-4 mt-4">
             <div className="text-gray-400 text-xs mb-1">Answer</div>
-            <div className="text-lg text-gray-200">{drill.target_text}</div>
+            <div className="text-base text-gray-200 leading-relaxed sm:text-lg">{drill.target_text}</div>
           </div>
         ) : (
           <button
             onClick={() => setRevealed(true)}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg transition-colors"
+            className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-lg transition-colors"
           >
             Reveal Answer
           </button>
@@ -364,11 +385,11 @@ function TranslationMode({ drills, sessionId }: {
       </div>
 
       {revealed && (
-        <div className="flex gap-3">
-          <button onClick={() => next(false)} className="flex-1 bg-red-900/50 hover:bg-red-900 text-red-300 py-3 rounded-lg font-medium">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button onClick={() => next(false)} className="bg-red-900/50 hover:bg-red-900 text-red-300 py-3 rounded-lg font-medium">
             ❌ Wrong
           </button>
-          <button onClick={() => next(true)} className="flex-1 bg-green-900/50 hover:bg-green-900 text-green-300 py-3 rounded-lg font-medium">
+          <button onClick={() => next(true)} className="bg-green-900/50 hover:bg-green-900 text-green-300 py-3 rounded-lg font-medium">
             ✅ Got it
           </button>
         </div>

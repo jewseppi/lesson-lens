@@ -11,6 +11,7 @@ Provides REST endpoints for:
 import hashlib
 import io
 import json
+import mimetypes
 import os
 import re
 import sqlite3
@@ -21,6 +22,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
@@ -442,6 +446,135 @@ def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
     }
 
 
+def _build_backup_archive(conn, user):
+    run = _load_latest_completed_run(conn, user["id"])
+    if not run:
+        raise ValueError("No parsed data to export")
+
+    output_dir = Path(run["output_dir"])
+    sessions_path = output_dir / "sessions.json"
+    if not sessions_path.is_file():
+        raise ValueError("Sessions artifact not found for latest run")
+
+    sessions_payload = json.loads(sessions_path.read_text(encoding="utf-8"))
+    upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (run["upload_id"],)).fetchone()
+    summaries = conn.execute(
+        "SELECT session_id, provider, model, lesson_data_json, created_at FROM lesson_summaries WHERE user_id = ? AND run_id = ? ORDER BY session_id ASC",
+        (user["id"], run["run_id"]),
+    ).fetchall()
+
+    manifest = _build_backup_manifest(user, run, upload, sessions_payload, summaries)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+        for artifact_name in ("sessions.json", "parse_report.json", "diagnostics.txt", "normalized_messages.jsonl"):
+            artifact_path = output_dir / artifact_name
+            if artifact_path.is_file():
+                archive.writestr(f"parse/{artifact_name}", artifact_path.read_bytes())
+
+        if upload:
+            raw_path = Path(app.config["UPLOAD_FOLDER"]) / upload["stored_filename"]
+            if raw_path.is_file():
+                backup_name = secure_filename(upload["original_filename"] or "line-export.txt") or "line-export.txt"
+                archive.writestr(f"raw-exports/{backup_name}", raw_path.read_bytes())
+
+        for summary in summaries:
+            archive.writestr(
+                f"summaries/{summary['session_id']}.json",
+                json.dumps(json.loads(summary["lesson_data_json"]), ensure_ascii=False, indent=2),
+            )
+
+    buffer.seek(0)
+    filename = f"lessonlens-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
+    return buffer.getvalue(), filename, manifest
+
+
+def _normalize_remote_base_url(url):
+    cleaned = (url or "").strip().rstrip("/")
+    parsed = urllib_parse.urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Remote URL must include http:// or https:// and a host")
+    if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
+        raise ValueError("Remote sync requires HTTPS unless you are targeting localhost")
+    return cleaned
+
+
+def _post_json(url, payload, headers=None, timeout=60):
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            return response.getcode(), json.loads(response.read().decode("utf-8") or "{}")
+    except urllib_error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(payload or "{}")
+        except Exception:
+            return exc.code, {"error": payload or f"Remote request failed with status {exc.code}"}
+
+
+def _encode_multipart_form(fields, files):
+    boundary = f"lessonlens-{uuid.uuid4().hex}"
+    chunks = []
+
+    for name, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ])
+
+    for file_spec in files:
+        mime_type = file_spec.get("content_type") or mimetypes.guess_type(file_spec["filename"])[0] or "application/octet-stream"
+        chunks.extend([
+            f"--{boundary}\r\n".encode("utf-8"),
+            (
+                f'Content-Disposition: form-data; name="{file_spec["field_name"]}"; '
+                f'filename="{file_spec["filename"]}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"),
+            file_spec["data"],
+            b"\r\n",
+        ])
+
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks), boundary
+
+
+def _post_multipart(url, fields, files, headers=None, timeout=120):
+    body, boundary = _encode_multipart_form(fields, files)
+    req = urllib_request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            return response.getcode(), json.loads(response.read().decode("utf-8") or "{}")
+    except urllib_error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace")
+        try:
+            return exc.code, json.loads(payload or "{}")
+        except Exception:
+            return exc.code, {"error": payload or f"Remote request failed with status {exc.code}"}
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
@@ -589,53 +722,93 @@ def export_backup():
         user = _load_user(conn, email)
         if not user:
             return jsonify({"error": "User not found"}), 404
-
-        run = _load_latest_completed_run(conn, user["id"])
-        if not run:
-            return jsonify({"error": "No parsed data to export"}), 404
-
-        output_dir = Path(run["output_dir"])
-        sessions_path = output_dir / "sessions.json"
-        if not sessions_path.is_file():
-            return jsonify({"error": "Sessions artifact not found for latest run"}), 404
-
-        sessions_payload = json.loads(sessions_path.read_text(encoding="utf-8"))
-        upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (run["upload_id"],)).fetchone()
-        summaries = conn.execute(
-            "SELECT session_id, provider, model, lesson_data_json, created_at FROM lesson_summaries WHERE user_id = ? AND run_id = ? ORDER BY session_id ASC",
-            (user["id"], run["run_id"]),
-        ).fetchall()
-
-        manifest = _build_backup_manifest(user, run, upload, sessions_payload, summaries)
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-
-            for artifact_name in ("sessions.json", "parse_report.json", "diagnostics.txt", "normalized_messages.jsonl"):
-                artifact_path = output_dir / artifact_name
-                if artifact_path.is_file():
-                    archive.writestr(f"parse/{artifact_name}", artifact_path.read_bytes())
-
-            if upload:
-                raw_path = Path(app.config["UPLOAD_FOLDER"]) / upload["stored_filename"]
-                if raw_path.is_file():
-                    backup_name = secure_filename(upload["original_filename"] or "line-export.txt") or "line-export.txt"
-                    archive.writestr(f"raw-exports/{backup_name}", raw_path.read_bytes())
-
-            for summary in summaries:
-                archive.writestr(
-                    f"summaries/{summary['session_id']}.json",
-                    json.dumps(json.loads(summary["lesson_data_json"]), ensure_ascii=False, indent=2),
-                )
-
-        buffer.seek(0)
-        filename = f"lessonlens-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
+        backup_bytes, filename, _manifest = _build_backup_archive(conn, user)
         return send_file(
-            buffer,
+            io.BytesIO(backup_bytes),
             mimetype="application/zip",
             as_attachment=True,
             download_name=filename,
         )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    finally:
+        conn.close()
+
+
+@app.route("/api/backup/sync-remote", methods=["POST"])
+@jwt_required()
+def sync_backup_remote():
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+
+    remote_base_url = data.get("remote_base_url", "")
+    remote_email = (data.get("remote_email", "") or "").strip().lower()
+    remote_password = data.get("remote_password", "") or ""
+    replace_existing = bool(data.get("replace_existing", True))
+
+    if not remote_base_url or not remote_email or not remote_password:
+        return jsonify({"error": "Remote URL, email, and password are required"}), 400
+
+    try:
+        remote_base = _normalize_remote_base_url(remote_base_url)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        backup_bytes, filename, manifest = _build_backup_archive(conn, user)
+
+        login_status, login_payload = _post_json(
+            f"{remote_base}/api/login",
+            {"email": remote_email, "password": remote_password},
+        )
+        if login_status >= 400:
+            return jsonify({
+                "error": login_payload.get("error") or "Remote login failed",
+                "remote_status": login_status,
+            }), 502
+
+        remote_token = login_payload.get("access_token")
+        if not remote_token:
+            return jsonify({"error": "Remote login did not return an access token"}), 502
+
+        import_status, import_payload = _post_multipart(
+            f"{remote_base}/api/backup/import",
+            {"replace_existing": "true" if replace_existing else "false"},
+            [{
+                "field_name": "file",
+                "filename": filename,
+                "data": backup_bytes,
+                "content_type": "application/zip",
+            }],
+            headers={"Authorization": f"Bearer {remote_token}"},
+        )
+        if import_status >= 400:
+            return jsonify({
+                "error": import_payload.get("error") or "Remote backup import failed",
+                "remote_status": import_status,
+            }), 502
+
+        _track_event(conn, user["id"], "sync_remote_backup", {
+            "remote_base_url": remote_base,
+            "replace_existing": replace_existing,
+            "summary_count": len(manifest.get("summaries", [])),
+            "session_count": manifest.get("latest_run", {}).get("session_count"),
+        })
+
+        return jsonify({
+            "message": "Remote sync completed successfully",
+            "remote_base_url": remote_base,
+            "session_count": import_payload.get("session_count", manifest.get("latest_run", {}).get("session_count", 0)),
+            "summary_count": import_payload.get("summary_count", len(manifest.get("summaries", []))),
+            "replace_existing": replace_existing,
+        }), 200
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     finally:
         conn.close()
 

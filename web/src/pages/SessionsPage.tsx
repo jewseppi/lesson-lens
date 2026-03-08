@@ -52,30 +52,30 @@ export default function SessionsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Sessions</h1>
         <span className="text-sm text-gray-400">{filtered.length} of {sessions.length}</span>
       </div>
 
       {/* Controls */}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <input
           type="text"
           placeholder="Search by date, topic..."
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-64"
+          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
         />
-        <div className="flex bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+        <div className="flex bg-gray-800 rounded-lg border border-gray-700 overflow-hidden w-full sm:w-auto">
           <button
             onClick={() => setSortMode('date')}
-            className={`px-3 py-2 text-sm transition-colors ${sortMode === 'date' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            className={`flex-1 px-3 py-2 text-sm transition-colors ${sortMode === 'date' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
           >
             By Date
           </button>
           <button
             onClick={() => setSortMode('content')}
-            className={`px-3 py-2 text-sm transition-colors ${sortMode === 'content' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            className={`flex-1 px-3 py-2 text-sm transition-colors ${sortMode === 'content' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
           >
             By Content
           </button>
@@ -108,12 +108,12 @@ function SessionCard({ session: s }: { session: Session }) {
       to={`/sessions/${s.session_id}`}
       className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-indigo-600 transition-colors"
     >
-      <div className="flex justify-between items-start">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
+        <div className="min-w-0">
           <div className="font-medium">{s.date}</div>
           <div className="text-sm text-gray-400">{s.start_time}–{s.end_time}</div>
           {s.topics.length > 0 && (
-            <div className="flex gap-1 mt-1">
+            <div className="flex flex-wrap gap-1 mt-1">
               {s.topics.map(t => (
                 <span key={t} className="bg-gray-800 text-gray-300 text-xs px-2 py-0.5 rounded">
                   {t}
@@ -122,7 +122,7 @@ function SessionCard({ session: s }: { session: Session }) {
             </div>
           )}
         </div>
-        <div className="text-right text-sm">
+        <div className="text-sm sm:text-right">
           <div>
             <span className="text-indigo-400 font-medium">{s.lesson_content_count}</span>
             <span className="text-gray-500"> lesson</span>

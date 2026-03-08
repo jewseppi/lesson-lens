@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  overflow-x: hidden;
+}
+
 /* Chinese text — base styles */
 .zh-text {
   font-weight: 600;
@@ -32,4 +42,22 @@
   padding: 0.15rem 0.55rem;
   font-size: 0.75rem;
   cursor: help;
+}
+
+.flashcard-shell {
+  min-height: 52svh;
+}
+
+.study-select {
+  background: #111827;
+}
+
+.mobile-safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
+}
+
+@media (min-width: 640px) {
+  .flashcard-shell {
+    min-height: 24rem;
+  }
 }
