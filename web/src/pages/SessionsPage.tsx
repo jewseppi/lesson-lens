@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { apiJson } from '../api';
-import type { Session } from '../types';
+import type { Session, SharedLink } from '../types';
 
 type SortMode = 'date' | 'content';
 
@@ -103,10 +103,12 @@ export default function SessionsPage() {
 }
 
 function SessionCard({ session: s }: { session: Session }) {
+  const navigate = useNavigate();
+
   return (
-    <Link
-      to={`/sessions/${s.session_id}`}
-      className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-indigo-600 transition-colors"
+    <div
+      onClick={() => navigate(`/sessions/${s.session_id}`)}
+      className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-indigo-600 transition-colors cursor-pointer"
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
         <div className="min-w-0">
@@ -135,6 +137,38 @@ function SessionCard({ session: s }: { session: Session }) {
           )}
         </div>
       </div>
-    </Link>
+
+      {s.shared_links.length > 0 && (
+        <SharedLinkPanel link={s.shared_links[0]} className="mt-3" />
+      )}
+    </div>
+  );
+}
+
+function SharedLinkPanel({ link, className = '' }: { link: SharedLink; className?: string }) {
+  return (
+    <div className={`rounded-lg border border-sky-800/60 bg-sky-950/20 p-3 ${className}`.trim()}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-wide text-sky-300">Shared Link</div>
+          <div className="truncate text-sm text-gray-300">{link.label || link.url}</div>
+        </div>
+        <a
+          href={link.url}
+          target="_blank"
+          rel="noreferrer"
+          onClick={event => event.stopPropagation()}
+          className="inline-flex items-center justify-center rounded-lg bg-sky-700 px-3 py-2 text-sm font-medium text-white hover:bg-sky-600"
+        >
+          Open Link
+        </a>
+      </div>
+      {(link.before_text || link.after_text) && (
+        <div className="mt-2 text-xs text-gray-400">
+          {link.before_text && <div>{link.before_text}</div>}
+          {link.after_text && <div>{link.after_text}</div>}
+        </div>
+      )}
+    </div>
   );
 }

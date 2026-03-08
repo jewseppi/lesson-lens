@@ -144,6 +144,51 @@ def _load_sessions_payload(run):
     }
 
 
+def _extract_session_links(session):
+    links = []
+    seen = set()
+    messages = session.get("messages", []) if isinstance(session, dict) else []
+    for index, message in enumerate(messages):
+        text = (message.get("text_raw") or "").strip()
+        if not text:
+            continue
+        for match in re.findall(r"https?://\S+", text):
+            url = match.rstrip(').,!?]}>"\'')
+            if not url or url in seen:
+                continue
+            seen.add(url)
+
+            before_text = None
+            after_text = None
+            for previous in reversed(messages[:index]):
+                candidate = (previous.get("text_raw") or "").strip()
+                if candidate and candidate != text:
+                    before_text = candidate
+                    break
+            for following in messages[index + 1:]:
+                candidate = (following.get("text_raw") or "").strip()
+                if candidate and candidate != text:
+                    after_text = candidate
+                    break
+
+            links.append({
+                "url": url,
+                "label": text if text != url else None,
+                "speaker_role": message.get("speaker_role"),
+                "speaker_raw": message.get("speaker_raw"),
+                "time": message.get("time"),
+                "before_text": before_text,
+                "after_text": after_text,
+            })
+    return links
+
+
+def _session_should_list(session):
+    message_count = session.get("message_count", 0) if isinstance(session, dict) else 0
+    links = _extract_session_links(session)
+    return message_count >= 3 or bool(links)
+
+
 def _load_generator_config(provider_override=None, model_override=None):
     import sys as _sys
 
@@ -1349,6 +1394,11 @@ def list_sessions():
         if not run:
             return jsonify([])
 
+        try:
+            sessions_by_id = _load_sessions_payload(run)
+        except FileNotFoundError:
+            sessions_by_id = {}
+
         rows = conn.execute(
             """SELECT s.*,
                       EXISTS(
@@ -1365,6 +1415,10 @@ def list_sessions():
 
         sessions = []
         for r in rows:
+            session_payload = sessions_by_id.get(r["session_id"], {})
+            shared_links = _extract_session_links(session_payload)
+            if session_payload and not (session_payload.get("message_count", 0) >= 3 or shared_links):
+                continue
             sessions.append({
                 "id": r["id"],
                 "session_id": r["session_id"],
@@ -1376,6 +1430,7 @@ def list_sessions():
                 "boundary_confidence": r["boundary_confidence"],
                 "topics": json.loads(r["topics_json"] or "[]"),
                 "has_summary": bool(r["has_summary"]),
+                "shared_links": shared_links,
             })
         return jsonify(sessions)
     finally:
@@ -1402,6 +1457,8 @@ def get_session(session_id):
         session = sessions_by_id.get(session_id)
         if not session:
             return jsonify({"error": "Session not found"}), 404
+
+        session["shared_links"] = _extract_session_links(session)
 
         return jsonify(session)
     finally:

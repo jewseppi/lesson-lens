@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { apiJson } from '../api';
 import { useFontSize } from '../FontSizeContext';
-import type { SessionDetail, Message } from '../types';
+import type { SessionDetail, Message, SharedLink } from '../types';
 
 export default function SessionDetailPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -13,7 +13,12 @@ export default function SessionDetailPage() {
   useEffect(() => {
     if (!sessionId) return;
     apiJson<SessionDetail>(`/api/sessions/${sessionId}`)
-      .then(setSession)
+      .then(data => {
+        setSession(data);
+        if (data.lesson_content_count === 0 && data.shared_links.length > 0) {
+          setShowAll(true);
+        }
+      })
       .finally(() => setLoading(false));
   }, [sessionId]);
 
@@ -48,6 +53,10 @@ export default function SessionDetailPage() {
         </div>
       </div>
 
+      {session.shared_links.length > 0 && (
+        <SharedLinkPanel link={session.shared_links[0]} />
+      )}
+
       {/* Filter toggle */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <button
@@ -68,6 +77,33 @@ export default function SessionDetailPage() {
         {displayMessages.map(msg => (
           <MessageBubble key={msg.message_id} message={msg} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function SharedLinkPanel({ link }: { link: SharedLink }) {
+  return (
+    <div className="rounded-xl border border-sky-800/60 bg-sky-950/20 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-wide text-sky-300">Shared Link</div>
+          <div className="mt-1 break-all text-sm text-gray-300">{link.label || link.url}</div>
+          {(link.before_text || link.after_text) && (
+            <div className="mt-2 space-y-1 text-sm text-gray-400">
+              {link.before_text && <div>{link.before_text}</div>}
+              {link.after_text && <div>{link.after_text}</div>}
+            </div>
+          )}
+        </div>
+        <a
+          href={link.url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center justify-center rounded-lg bg-sky-700 px-4 py-3 text-sm font-medium text-white hover:bg-sky-600"
+        >
+          Open Shared Link
+        </a>
       </div>
     </div>
   );

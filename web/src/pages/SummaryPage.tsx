@@ -111,6 +111,7 @@ export default function SummaryPage() {
   if (!summary) return null;
 
   const { zhClass } = useFontSize();
+  const hasVocabularyZhuyin = summary.vocabulary.some(item => Boolean(item.zhuyin));
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 sm:space-y-8">
@@ -174,7 +175,7 @@ export default function SummaryPage() {
                 <tr className="text-left text-gray-500 border-b border-gray-800">
                   <th className="pb-2 pr-4">Term</th>
                   <th className="pb-2 pr-4">Pinyin</th>
-                  <th className="pb-2 pr-4">Zhuyin</th>
+                  {hasVocabularyZhuyin && <th className="pb-2 pr-4">Zhuyin</th>}
                   <th className="pb-2 pr-4">English</th>
                   <th className="pb-2">Type</th>
                 </tr>
@@ -189,7 +190,7 @@ export default function SummaryPage() {
                         <PronunciationNote note={v.pronunciation_note} />
                       </div>
                     </td>
-                    <td className="py-2 pr-4 text-sky-300">{v.zhuyin || '—'}</td>
+                    {hasVocabularyZhuyin && <td className="py-2 pr-4 text-sky-300">{v.zhuyin || '—'}</td>}
                     <td className="py-2 pr-4 text-gray-300">{v.en}</td>
                     <td className="py-2 text-gray-500">{v.pos_or_type}</td>
                   </tr>

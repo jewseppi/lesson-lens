@@ -32,6 +32,17 @@ export interface Session {
   boundary_confidence: 'high' | 'medium' | 'low';
   topics: string[];
   has_summary: boolean;
+  shared_links: SharedLink[];
+}
+
+export interface SharedLink {
+  url: string;
+  label?: string | null;
+  speaker_role?: 'teacher' | 'student' | 'unknown';
+  speaker_raw?: string;
+  time?: string;
+  before_text?: string | null;
+  after_text?: string | null;
 }
 
 export interface Message {
@@ -57,6 +68,7 @@ export interface SessionDetail {
   lesson_content_count: number;
   boundary_confidence: string;
   messages: Message[];
+  shared_links: SharedLink[];
 }
 
 export interface KeySentence {
