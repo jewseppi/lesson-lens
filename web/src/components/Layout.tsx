@@ -29,8 +29,9 @@ export default function Layout() {
       <nav className="bg-gray-900 border-b border-gray-800">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 min-h-14 flex items-center justify-between gap-3 py-2">
           <div className="flex items-center gap-2 min-w-0">
-            <NavLink to="/" className="text-lg font-bold text-indigo-400 mr-6">
-              📖 LessonLens
+            <NavLink to="/" className="mr-6 inline-flex items-center gap-2 text-lg font-bold text-indigo-400 min-w-0">
+              <img src="/lessonlens-favicon.svg" alt="" aria-hidden="true" className="h-7 w-7 shrink-0 rounded-md" />
+              <span className="truncate">LessonLens</span>
             </NavLink>
             <div className="hidden md:flex items-center gap-1">
               <NavLink to="/" className={linkClass} end>Dashboard</NavLink>

@@ -24,7 +24,10 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
-        <h1 className="text-3xl font-bold text-center text-indigo-400 mb-2">📖 LessonLens</h1>
+        <div className="mb-2 flex items-center justify-center gap-3 text-indigo-400">
+          <img src="/lessonlens-favicon.svg" alt="" aria-hidden="true" className="h-10 w-10 rounded-lg" />
+          <h1 className="text-3xl font-bold">LessonLens</h1>
+        </div>
         <p className="text-center text-gray-400 mb-8">Language lesson summarizer</p>
 
         <form onSubmit={handleSubmit} className="bg-gray-900 rounded-xl p-6 border border-gray-800 space-y-4">
