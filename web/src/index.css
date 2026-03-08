@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Chinese text — base styles */
+.zh-text {
+  font-weight: 600;
+  line-height: 1.6;
+}
+.zh-normal { font-size: 1.25em; }
+.zh-large  { font-size: 1.6em; }
+.zh-xl     { font-size: 2em; }
+
+.pinyin-text {
+  color: #6b7280;
+  font-style: italic;
+  font-size: 0.95em;
+}

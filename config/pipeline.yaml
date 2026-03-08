@@ -1,0 +1,47 @@
+# Language Lesson Summarizer — Pipeline Configuration
+
+# Parser settings
+parser:
+  timezone: "Asia/Taipei"
+  lesson_gap_minutes: 90
+  min_lesson_content_messages: 3
+  unknown_pattern_threshold: 0.1
+
+# Speaker mapping
+speakers:
+  teacher_aliases:
+    - "郝景新(Jessie)"
+  student_aliases:
+    - "Joseph"
+
+# Language and output policy
+language:
+  script: "traditional"
+  pinyin_policy: "every_line"
+  translation_language: "english"
+
+# Content filtering
+filtering:
+  include_links_in_summary: false
+  include_logistics_appendix: true
+  media_placeholders:
+    - "[Photo]"
+    - "[File]"
+    - "[Sticker]"
+    - "[Contact]"
+  call_system_phrases:
+    - "called you. You can make and receive calls"
+
+# Output toggles
+outputs:
+  markdown: true
+  json: true
+  csv: true
+  html: true
+
+# LLM provider (manual selection per run)
+generation:
+  default_provider: "openai"
+  default_model: "gpt-4o"
+  temperature: 0.3
+  prompt_version: "v1"

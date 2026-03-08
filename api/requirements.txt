@@ -1,0 +1,7 @@
+flask>=3.0
+flask-cors>=4.0
+flask-jwt-extended>=4.6
+pyyaml>=6.0
+openai>=2.26
+anthropic>=0.84
+google-generativeai>=0.8

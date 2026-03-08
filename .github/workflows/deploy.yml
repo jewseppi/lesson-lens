@@ -1,0 +1,95 @@
+name: Deploy LessonLens
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload app files
+        run: |
+          rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+            --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "web/node_modules" \
+            --exclude "web/src" \
+            --exclude "web/public" \
+            --exclude "web/.vite" \
+            --exclude "api/__pycache__" \
+            --exclude "api/*.db" \
+            --exclude "api/*.db-shm" \
+            --exclude "api/*.db-wal" \
+            --exclude "raw-exports" \
+            --exclude "processed" \
+            --exclude "summaries" \
+            --exclude "flashcards" \
+            --exclude "html" \
+            ./ "${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.DEPLOY_PATH }}/language/"
+
+      - name: Install dependencies and restart Passenger
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            APP_ROOT="${{ secrets.DEPLOY_PATH }}/language"
+            API_ROOT="$APP_ROOT/api"
+            PYTHON_ROOT="${{ secrets.PASSENGER_PYTHON_PATH }}"
+
+            mkdir -p "$API_ROOT/tmp" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries"
+
+            cd "$API_ROOT"
+            source "$PYTHON_ROOT/bin/activate"
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            python -c "from app import init_db; init_db()"
+
+            cat > .htaccess <<HTACCESS_EOF
+            RewriteEngine Off
+            Options -MultiViews
+            PassengerEnabled on
+            PassengerAppRoot $API_ROOT
+            PassengerAppType wsgi
+            PassengerStartupFile passenger_wsgi.py
+            PassengerBaseURI /
+            PassengerPython $PYTHON_ROOT/bin/python
+            ErrorDocument 404 "Not Found"
+            ErrorDocument 500 "Server Error"
+            HTACCESS_EOF
+
+            chmod 755 "$API_ROOT" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries" "$API_ROOT/tmp"
+            chmod 644 passenger_wsgi.py .htaccess requirements.txt
+            touch "$API_ROOT/tmp/restart.txt"
+
+      - name: Verify deployment
+        run: |
+          sleep 15
+          curl -f "https://lens.jsilverman.ca/api/health"

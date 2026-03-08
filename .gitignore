@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Generated lesson artifacts and local user data
+processed/**
+summaries/**
+flashcards/**
+html/**
+raw-exports/**
+
+# Backend runtime data
+api/uploads/**
+api/instance/**
+api/*.db
+api/*.db-shm
+api/*.db-wal
+
+# Keep gitkeep files
+!**/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# Web build
+web/node_modules/
+web/dist/
+
+# Environment
+.env
+.env.local

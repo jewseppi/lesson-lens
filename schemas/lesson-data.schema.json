@@ -1,0 +1,247 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "lesson-data.v1",
+  "title": "Lesson Study Package",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "lesson_id",
+    "lesson_date",
+    "title",
+    "source_session_ids",
+    "language_mode",
+    "summary",
+    "key_sentences",
+    "vocabulary",
+    "corrections",
+    "review",
+    "assets",
+    "generation_meta"
+  ],
+  "properties": {
+    "schema_version": { "const": "lesson-data.v1" },
+    "lesson_id": { "type": "string" },
+    "lesson_date": { "type": "string", "format": "date" },
+    "title": { "type": "string" },
+    "source_session_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "language_mode": {
+      "type": "object",
+      "required": ["script", "pinyin_policy", "translation_language"],
+      "properties": {
+        "script": {
+          "type": "string",
+          "enum": ["traditional", "simplified", "both"]
+        },
+        "pinyin_policy": {
+          "type": "string",
+          "enum": ["every_line", "new_words_only", "ui_toggle"]
+        },
+        "translation_language": { "type": "string" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["overview", "usage_notes", "short_recap"],
+      "properties": {
+        "overview": { "type": "string" },
+        "usage_notes": { "type": "string" },
+        "short_recap": { "type": "string" },
+        "teacher_focus": { "type": "string" },
+        "student_focus": { "type": "string" }
+      }
+    },
+    "key_sentences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "zh", "pinyin", "en", "source_refs"],
+        "properties": {
+          "id": { "type": "string" },
+          "zh": { "type": "string" },
+          "pinyin": { "type": "string", "minLength": 1 },
+          "en": { "type": "string" },
+          "source_refs": { "type": "array", "items": { "type": "string" } },
+          "context_note": { "type": "string" },
+          "audio_hint": { "type": "string" },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    },
+    "vocabulary": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "term_zh",
+          "pinyin",
+          "en",
+          "pos_or_type",
+          "example_zh",
+          "example_en"
+        ],
+        "properties": {
+          "term_zh": { "type": "string" },
+          "pinyin": { "type": "string", "minLength": 1 },
+          "en": { "type": "string" },
+          "pos_or_type": { "type": "string" },
+          "example_zh": { "type": "string" },
+          "example_en": { "type": "string" },
+          "example_pinyin": { "type": "string" },
+          "frequency_tag": { "type": "string" },
+          "difficulty": { "type": "string" },
+          "related_terms": { "type": "array", "items": { "type": "string" } },
+          "source_refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "learner_original",
+          "teacher_correction",
+          "reason",
+          "source_refs"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "learner_original": { "type": "string" },
+          "teacher_correction": { "type": "string" },
+          "reason": { "type": "string" },
+          "source_refs": { "type": "array", "items": { "type": "string" } },
+          "pattern_tag": { "type": "string" },
+          "practice_prompt": { "type": "string" }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["flashcards", "fill_blank", "translation_drills", "quiz"],
+      "properties": {
+        "flashcards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "front", "back"],
+            "properties": {
+              "id": { "type": "string" },
+              "front": { "type": "string" },
+              "back": { "type": "string" },
+              "hint": { "type": "string" },
+              "tags": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "fill_blank": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "sentence", "blank_word", "answer"],
+            "properties": {
+              "id": { "type": "string" },
+              "sentence": { "type": "string" },
+              "blank_word": { "type": "string" },
+              "answer": { "type": "string" },
+              "hint": { "type": "string" }
+            }
+          }
+        },
+        "translation_drills": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "source_lang", "source_text", "target_text"],
+            "properties": {
+              "id": { "type": "string" },
+              "source_lang": { "type": "string", "enum": ["en", "zh"] },
+              "source_text": { "type": "string" },
+              "target_text": { "type": "string" },
+              "hint": { "type": "string" }
+            }
+          }
+        },
+        "quiz": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "question", "options", "correct_index"],
+            "properties": {
+              "id": { "type": "string" },
+              "question": { "type": "string" },
+              "options": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 2
+              },
+              "correct_index": { "type": "integer", "minimum": 0 },
+              "explanation": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "required": ["markdown_path", "html_path", "flashcards_csv_path"],
+      "properties": {
+        "markdown_path": { "type": "string" },
+        "html_path": { "type": "string" },
+        "flashcards_csv_path": { "type": "string" },
+        "anki_csv_path": { "type": "string" },
+        "image_refs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "generation_meta": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "prompt_version",
+        "generated_at",
+        "run_id"
+      ],
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "prompt_version": { "type": "string" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "run_id": { "type": "string" },
+        "temperature": { "type": "number" },
+        "token_usage": { "type": "integer" },
+        "cost_estimate": { "type": "number" },
+        "post_edit_notes": { "type": "string" }
+      }
+    },
+    "grammar_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string" },
+          "explanation": { "type": "string" },
+          "examples": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "confidence_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["area", "level", "detail"],
+        "properties": {
+          "area": { "type": "string" },
+          "level": { "type": "string", "enum": ["high", "medium", "low"] },
+          "detail": { "type": "string" },
+          "source_refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "appendix": { "type": "object" }
+  }
+}

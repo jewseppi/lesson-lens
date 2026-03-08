@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "sessions.v1",
+  "title": "Parsed Chat Sessions",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "source",
+    "parser_version",
+    "generated_at",
+    "sessions",
+    "stats",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "const": "sessions.v1" },
+    "run_id": { "type": "string" },
+    "parser_version": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "required": [
+        "file_name",
+        "file_hash_sha256",
+        "encoding",
+        "timezone",
+        "line_count"
+      ],
+      "properties": {
+        "file_name": { "type": "string" },
+        "file_hash_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "encoding": { "type": "string" },
+        "timezone": { "type": "string" },
+        "line_count": { "type": "integer", "minimum": 0 },
+        "source_app_guess": { "type": "string" },
+        "saved_on_text": { "type": "string" }
+      }
+    },
+    "config_snapshot": { "type": "object" },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "date",
+          "start_time",
+          "end_time",
+          "message_count",
+          "lesson_content_count",
+          "boundary_confidence",
+          "messages"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}(-\\d+)?$"
+          },
+          "date": { "type": "string", "format": "date" },
+          "start_time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$" },
+          "end_time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$" },
+          "message_count": { "type": "integer", "minimum": 0 },
+          "lesson_content_count": { "type": "integer", "minimum": 0 },
+          "boundary_confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "logistics_count": { "type": "integer", "minimum": 0 },
+          "media_count": { "type": "integer", "minimum": 0 },
+          "links_count": { "type": "integer", "minimum": 0 },
+          "topic_hints": { "type": "array", "items": { "type": "string" } },
+          "parse_flags": { "type": "array", "items": { "type": "string" } },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "message_id",
+                "line_start",
+                "line_end",
+                "time",
+                "speaker_role",
+                "message_type",
+                "text_raw"
+              ],
+              "properties": {
+                "message_id": { "type": "string" },
+                "line_start": { "type": "integer", "minimum": 1 },
+                "line_end": { "type": "integer", "minimum": 1 },
+                "time": { "type": "string", "pattern": "^\\d{2}:\\d{2}$" },
+                "speaker_role": {
+                  "type": "string",
+                  "enum": ["teacher", "student", "unknown"]
+                },
+                "speaker_raw": { "type": "string" },
+                "message_type": {
+                  "type": "string",
+                  "enum": [
+                    "lesson-content",
+                    "logistics",
+                    "media-reference",
+                    "call-system",
+                    "link",
+                    "other"
+                  ]
+                },
+                "text_raw": { "type": "string" },
+                "text_normalized": { "type": "string" },
+                "language_hint": {
+                  "type": "string",
+                  "enum": ["zh", "en", "pinyin", "mixed", "other"]
+                },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "confidence": {
+                  "type": "string",
+                  "enum": ["high", "medium", "low"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": [
+        "total_messages",
+        "total_sessions",
+        "lesson_content_messages",
+        "logistics_messages",
+        "media_messages",
+        "unknown_pattern_count"
+      ],
+      "properties": {
+        "total_messages": { "type": "integer", "minimum": 0 },
+        "total_sessions": { "type": "integer", "minimum": 0 },
+        "lesson_content_messages": { "type": "integer", "minimum": 0 },
+        "logistics_messages": { "type": "integer", "minimum": 0 },
+        "media_messages": { "type": "integer", "minimum": 0 },
+        "unknown_pattern_count": { "type": "integer", "minimum": 0 },
+        "pinyin_numeric_count": { "type": "integer", "minimum": 0 },
+        "pinyin_diacritic_count": { "type": "integer", "minimum": 0 },
+        "zhuyin_count": { "type": "integer", "minimum": 0 },
+        "bilingual_pair_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "warn", "error"] },
+          "message": { "type": "string" },
+          "line_refs": { "type": "array", "items": { "type": "integer" } },
+          "session_id": { "type": "string" }
+        }
+      }
+    }
+  }
+}
