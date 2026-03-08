@@ -235,13 +235,16 @@ export default function SummaryPage() {
         >
           🎯 Study This Lesson
         </Link>
-        <button
-          onClick={() => { setSummary(null); setNoSummary(true); }}
+        <Link
+          to="/settings"
           className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-6 py-3 rounded-lg font-medium transition-colors border border-gray-700"
         >
-          🔄 Regenerate
-        </button>
+          ⬆ Update Summary JSON
+        </Link>
       </div>
+      <p className="text-sm text-gray-500">
+        To revise this lesson, upload a new lesson-data.json from Settings using Import Summary Package.
+      </p>
     </div>
   );
 }

@@ -55,7 +55,7 @@ load_local_env()
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = ROOT_DIR / "web" / "dist"
 
-app = Flask(__name__, static_folder=str(WEB_DIST_DIR), static_url_path="")
+app = Flask(__name__, static_folder=None)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", app.config["SECRET_KEY"])
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
