@@ -4,14 +4,15 @@
 
 Use one Python web app and one domain.
 
-- App folder on server: `<DEPLOY_PATH>/language`
-- WSGI app root: `<DEPLOY_PATH>/language/api`
-- Frontend build output: `<DEPLOY_PATH>/language/web/dist`
-- Database: `<DEPLOY_PATH>/language/api/lessonlens.db`
+- App root on server: `<APP_ROOT>`
+- WSGI app root: `<APP_ROOT>`
+- API code: `<APP_ROOT>/api`
+- Frontend build output: `<APP_ROOT>/web/dist`
+- Database: `<APP_ROOT>/api/lessonlens.db`
 - Writable runtime folders:
-  - `<DEPLOY_PATH>/language/raw-exports`
-  - `<DEPLOY_PATH>/language/processed`
-  - `<DEPLOY_PATH>/language/summaries`
+  - `<APP_ROOT>/raw-exports`
+  - `<APP_ROOT>/processed`
+  - `<APP_ROOT>/summaries`
 
 The Flask app serves both the React frontend and the `/api/*` routes.
 
@@ -36,10 +37,10 @@ Add these repository secrets:
 - `HOST`: SSH host
 - `USERNAME`: SSH username
 - `SSH_PRIVATE_KEY`: private key used for deployment access
-- `DEPLOY_PATH`: absolute path on the server, for example `/home/USERNAME/apps`
+- `APP_ROOT`: absolute application root on the server, for example `/home/USERNAME/public_html/api/lens`
 - `PASSENGER_PYTHON_PATH`: absolute path to the Python virtualenv root on the server
 
-The workflow uploads the repo to `<DEPLOY_PATH>/language/`, builds the frontend,
+The workflow uploads the repo to `<APP_ROOT>/`, builds the frontend,
 installs Python requirements, initializes the SQLite schema, writes `.htaccess`,
 and restarts the Python app.
 
