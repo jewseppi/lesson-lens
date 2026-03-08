@@ -14,3 +14,22 @@
   font-style: italic;
   font-size: 0.95em;
 }
+
+.zhuyin-text {
+  color: #93c5fd;
+  font-size: 0.9em;
+  letter-spacing: 0.03em;
+}
+
+.pronunciation-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #c4b5fd;
+  border: 1px dashed #4c1d95;
+  background: rgba(76, 29, 149, 0.18);
+  border-radius: 9999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.75rem;
+  cursor: help;
+}

@@ -63,19 +63,24 @@ export interface KeySentence {
   id: string;
   zh: string;
   pinyin: string;
+  zhuyin?: string;
   en: string;
   source_refs: string[];
   context_note?: string;
+  pronunciation_note?: string;
 }
 
 export interface VocabItem {
   term_zh: string;
   pinyin: string;
+  zhuyin?: string;
   en: string;
   pos_or_type: string;
   example_zh: string;
   example_en: string;
   example_pinyin?: string;
+  example_zhuyin?: string;
+  pronunciation_note?: string;
 }
 
 export interface Correction {

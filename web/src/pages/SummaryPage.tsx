@@ -12,6 +12,16 @@ function getStoredProvider(): Provider {
   return value === 'anthropic' || value === 'gemini' ? value : 'openai';
 }
 
+function PronunciationNote({ note }: { note?: string }) {
+  if (!note) return null;
+
+  return (
+    <span className="pronunciation-note" title={note} aria-label={note}>
+      Tone note
+    </span>
+  );
+}
+
 export default function SummaryPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [summary, setSummary] = useState<LessonSummary | null>(null);
@@ -124,7 +134,11 @@ export default function SummaryPage() {
             {summary.key_sentences.map(ks => (
               <div key={ks.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div className={zhClass}>{ks.zh}</div>
-                <div className="pinyin-text">{ks.pinyin}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <div className="pinyin-text">{ks.pinyin}</div>
+                  <PronunciationNote note={ks.pronunciation_note} />
+                </div>
+                {ks.zhuyin && <div className="zhuyin-text mt-1">{ks.zhuyin}</div>}
                 <div className="text-gray-300 mt-1">{ks.en}</div>
                 {ks.context_note && <div className="text-gray-500 text-sm mt-1 italic">{ks.context_note}</div>}
               </div>
@@ -143,6 +157,7 @@ export default function SummaryPage() {
                 <tr className="text-left text-gray-500 border-b border-gray-800">
                   <th className="pb-2 pr-4">Term</th>
                   <th className="pb-2 pr-4">Pinyin</th>
+                  <th className="pb-2 pr-4">Zhuyin</th>
                   <th className="pb-2 pr-4">English</th>
                   <th className="pb-2">Type</th>
                 </tr>
@@ -151,13 +166,31 @@ export default function SummaryPage() {
                 {summary.vocabulary.map((v, i) => (
                   <tr key={i} className="border-b border-gray-800/50">
                     <td className="py-2 pr-4 font-medium"><span className={zhClass}>{v.term_zh}</span></td>
-                    <td className="py-2 pr-4 text-gray-400 italic">{v.pinyin}</td>
+                    <td className="py-2 pr-4 text-gray-400 italic">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>{v.pinyin}</span>
+                        <PronunciationNote note={v.pronunciation_note} />
+                      </div>
+                    </td>
+                    <td className="py-2 pr-4 text-sky-300">{v.zhuyin || '—'}</td>
                     <td className="py-2 pr-4 text-gray-300">{v.en}</td>
                     <td className="py-2 text-gray-500">{v.pos_or_type}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="mt-4 space-y-3">
+            {summary.vocabulary.map((v, i) => (
+              (v.example_pinyin || v.example_zhuyin) ? (
+                <div key={`${v.term_zh}-${i}-example`} className="bg-gray-900/40 border border-gray-800 rounded-lg p-3">
+                  <div className={`${zhClass} text-base`}>{v.example_zh}</div>
+                  {v.example_pinyin && <div className="pinyin-text mt-1">{v.example_pinyin}</div>}
+                  {v.example_zhuyin && <div className="zhuyin-text mt-1">{v.example_zhuyin}</div>}
+                  <div className="text-gray-400 text-sm mt-1">{v.example_en}</div>
+                </div>
+              ) : null
+            ))}
           </div>
         </section>
       )}
