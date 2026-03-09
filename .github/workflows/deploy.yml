@@ -72,17 +72,17 @@ jobs:
             python seed_admin.py
 
             cat > "$APP_ROOT/.htaccess" <<HTACCESS_EOF
-            RewriteEngine Off
-            Options -MultiViews
-            PassengerEnabled on
-            PassengerAppRoot $APP_ROOT
-            PassengerAppType wsgi
-            PassengerStartupFile passenger_wsgi.py
-            PassengerBaseURI /
-            PassengerPython $PYTHON_ROOT/bin/python
-            ErrorDocument 404 "Not Found"
-            ErrorDocument 500 "Server Error"
-            HTACCESS_EOF
+RewriteEngine Off
+Options -MultiViews
+PassengerEnabled on
+PassengerAppRoot $APP_ROOT
+PassengerAppType wsgi
+PassengerStartupFile passenger_wsgi.py
+PassengerBaseURI /
+PassengerPython $PYTHON_ROOT/bin/python
+ErrorDocument 404 "Not Found"
+ErrorDocument 500 "Server Error"
+HTACCESS_EOF
 
             chmod 755 "$APP_ROOT" "$API_ROOT" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries" "$APP_ROOT/tmp"
             chmod 644 "$APP_ROOT/passenger_wsgi.py" "$APP_ROOT/.htaccess" "$API_ROOT/requirements.txt"
