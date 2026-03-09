@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react';
 import { useAuth } from '../AuthContext';
 
+const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
 export default function LoginPage() {
   const { login } = useAuth();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState(isDev ? 'admin@lessonlens.local' : '');
+  const [password, setPassword] = useState(isDev ? 'adminpassword1' : '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 

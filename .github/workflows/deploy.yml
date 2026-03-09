@@ -77,7 +77,6 @@ jobs:
             pip install --upgrade pip
             pip install -r requirements.txt
             python -c "from app import init_db; init_db()"
-            python seed_admin.py
 
             printf '%s\n' \
               "RewriteEngine Off" \
