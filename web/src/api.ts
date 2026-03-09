@@ -1,4 +1,5 @@
-const API_BASE = '';
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+const PREVIEW_MODE = import.meta.env.VITE_PREVIEW_MODE === 'true';
 
 type ApiRequestOptions = RequestInit & {
   suppressUnauthorizedRedirect?: boolean;
@@ -12,6 +13,9 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}) {
   };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+  if (PREVIEW_MODE) {
+    headers['X-Preview-Mode'] = 'true';
   }
   // Don't set Content-Type for FormData (file uploads)
   if (!(requestOptions.body instanceof FormData) && !headers['Content-Type']) {

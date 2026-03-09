@@ -74,9 +74,23 @@ CORS(app, origins=[
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
+    re.compile(r"https://[a-z0-9-]+\.pages\.dev"),
 ])
 
 DB_PATH = str(ROOT_DIR / "api" / "lessonlens.db")
+
+# ---------------------------------------------------------------------------
+# Preview mode — read-only enforcement for Cloudflare Pages preview builds
+# ---------------------------------------------------------------------------
+_PREVIEW_SAFE = {"/api/login", "/api/logout", "/api/refresh"}
+
+
+@app.before_request
+def enforce_preview_mode():
+    if request.headers.get("X-Preview-Mode") == "true":
+        if request.method not in ("GET", "HEAD", "OPTIONS") and request.path not in _PREVIEW_SAFE:
+            return jsonify({"error": "This action is not available in preview mode"}), 403
+
 
 # ---------------------------------------------------------------------------
 # Security headers
@@ -102,11 +116,12 @@ def rate_limit(max_requests=10, window_seconds=60):
             if app.config.get("TESTING"):
                 return f(*args, **kwargs)
             ip = request.environ.get("HTTP_X_FORWARDED_FOR", request.remote_addr)
+            key = f"{ip}:{f.__name__}"
             now = time.time()
-            _rate_counts[ip] = [t for t in _rate_counts[ip] if now - t < window_seconds]
-            if len(_rate_counts[ip]) >= max_requests:
+            _rate_counts[key] = [t for t in _rate_counts[key] if now - t < window_seconds]
+            if len(_rate_counts[key]) >= max_requests:
                 return jsonify({"error": "Rate limit exceeded"}), 429
-            _rate_counts[ip].append(now)
+            _rate_counts[key].append(now)
             return f(*args, **kwargs)
         return wrapper
     return decorator

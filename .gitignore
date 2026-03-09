@@ -39,3 +39,16 @@ web/dist/
 # Environment
 .env
 .env.local
+
+# Test artifacts
+.coverage
+coverage.xml
+test-results.xml
+test-results/
+htmlcov/
+api/.coverage
+api/coverage.xml
+api/test-results.xml
+api/htmlcov/
+playwright-report/
+node_modules/

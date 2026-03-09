@@ -1,0 +1,25 @@
+{
+  "name": "@playwright/language",
+  "version": "1.0.0",
+  "description": "Turns exported LINE/chat lesson transcripts into structured study packages: lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.",
+  "main": "index.js",
+  "scripts": {
+    "test:e2e": "npx playwright test",
+    "test:e2e:ui": "npx playwright test --ui"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jewseppi/lesson-lens.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jewseppi/lesson-lens/issues"
+  },
+  "homepage": "https://github.com/jewseppi/lesson-lens#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

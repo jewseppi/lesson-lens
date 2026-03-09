@@ -58,3 +58,30 @@ and restarts the Python app.
 - SQLite is expected and supported in this setup.
 - Do not commit the live database file.
 - If you later want separate frontend and API domains, the current code can be split again, but the single-domain deployment is the simplest path right now.
+
+## Database Security Baseline (Hosted)
+
+For public launch, apply these controls even if the code is open:
+
+1. Remove default secret fallbacks in production and fail startup when required secrets are missing.
+2. Put DB behind private networking; do not expose DB port publicly.
+3. Use separate DB roles:
+  - runtime app role (minimum read/write),
+  - migration role (DDL only in CI/CD),
+  - admin break-glass role (MFA, short-lived).
+4. Keep credentials in a secret manager; rotate on schedule and after incidents.
+5. Enable encrypted backups and immutable retention (object lock/WORM where possible).
+6. Enable centralized audit logs for login/admin/backup/import actions.
+7. Test restore regularly with a documented RTO/RPO target.
+
+## Hybrid Storage Option (Encrypted Personal Data)
+
+If you choose a hybrid model for sensitive chat history:
+
+1. Store account/operational metadata in Postgres.
+2. Encrypt chat payloads with per-user keys.
+3. Store encrypted blobs in content-addressed storage (IPFS pinning or S3-compatible object storage).
+4. Keep only metadata and content references (CID/hash, owner, key envelope ref) in DB.
+5. Implement crypto-erasure and unpin/delete for user data deletion workflows.
+
+Important: IPFS does not provide confidentiality by itself. Encryption and key lifecycle management are the security boundary.
