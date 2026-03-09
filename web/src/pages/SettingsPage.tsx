@@ -39,12 +39,15 @@ export default function SettingsPage() {
     existing_session_count: number;
     existing_summary_count: number;
   } | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
   const [backupStatus, setBackupStatus] = useState('');
   const [backupError, setBackupError] = useState('');
   const [remoteBaseUrl, setRemoteBaseUrl] = useState(() => localStorage.getItem(REMOTE_URL_KEY) || '');
   const [remoteEmail, setRemoteEmail] = useState(() => localStorage.getItem(REMOTE_EMAIL_KEY) || (user?.email ?? ''));
   const [remotePassword, setRemotePassword] = useState('');
   const [syncingRemote, setSyncingRemote] = useState(false);
+  const [remoteSyncReplace, setRemoteSyncReplace] = useState(false);
+  const [confirmRemoteReplace, setConfirmRemoteReplace] = useState(false);
   const [remoteSyncStatus, setRemoteSyncStatus] = useState('');
   const [remoteSyncError, setRemoteSyncError] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
@@ -151,7 +154,7 @@ export default function SettingsPage() {
     }
   };
 
-  const handleBackupImport = async () => {
+  const handleBackupImport = async (replaceAll = false) => {
     if (!backupFile) {
       setBackupError('Choose a backup .zip file first.');
       return;
@@ -160,10 +163,11 @@ export default function SettingsPage() {
     setImportingBackup(true);
     setBackupError('');
     setBackupStatus('');
+    setConfirmReplace(false);
     try {
       const formData = new FormData();
       formData.append('file', backupFile);
-      formData.append('replace_existing', 'false');
+      formData.append('replace_existing', replaceAll ? 'true' : 'false');
       const res = await apiFetch('/api/backup/import', {
         method: 'POST',
         body: formData,
@@ -201,6 +205,7 @@ export default function SettingsPage() {
     localStorage.setItem(REMOTE_URL_KEY, remoteBaseUrl.trim());
     localStorage.setItem(REMOTE_EMAIL_KEY, remoteEmail.trim());
 
+    setConfirmRemoteReplace(false);
     try {
       const result = await apiJson<{
         message: string;
@@ -215,7 +220,7 @@ export default function SettingsPage() {
           remote_base_url: remoteBaseUrl.trim(),
           remote_email: remoteEmail.trim(),
           remote_password: remotePassword,
-          replace_existing: false,
+          replace_existing: remoteSyncReplace,
         }),
       });
 
@@ -469,18 +474,51 @@ export default function SettingsPage() {
                 <p className="text-sm text-yellow-400">Nothing new to import — everything in this backup already exists.</p>
               ) : (
                 <button
-                  onClick={() => void handleBackupImport()}
+                  onClick={() => void handleBackupImport(false)}
                   disabled={importingBackup}
                   className="w-full sm:w-auto bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
                 >
                   {importingBackup ? 'Importing...' : `Import ${backupPreview.new_session_count} New Sessions & ${backupPreview.new_summary_count} Summaries`}
                 </button>
               )}
+
+              <div className="border-t border-gray-700 pt-3 mt-3">
+                {!confirmReplace ? (
+                  <button
+                    onClick={() => setConfirmReplace(true)}
+                    disabled={importingBackup}
+                    className="text-sm text-red-400 hover:text-red-300 underline underline-offset-2 transition-colors"
+                  >
+                    Replace entire dataset instead...
+                  </button>
+                ) : (
+                  <div className="bg-red-950/60 border border-red-800 rounded-lg p-3 space-y-2">
+                    <p className="text-sm text-red-300 font-semibold">⚠️ This will delete ALL existing sessions and summaries on this account and replace them with the backup contents.</p>
+                    <p className="text-xs text-red-400">This action cannot be undone. Export a backup first if you need to preserve your current data.</p>
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={() => void handleBackupImport(true)}
+                        disabled={importingBackup}
+                        className="bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-sm px-4 py-2 rounded-lg font-medium transition-colors"
+                      >
+                        {importingBackup ? 'Replacing...' : 'Yes, Replace Everything'}
+                      </button>
+                      <button
+                        onClick={() => setConfirmReplace(false)}
+                        disabled={importingBackup}
+                        className="bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm px-4 py-2 rounded-lg font-medium transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
           <p className="text-xs text-gray-500">
-            Only new sessions and summaries will be added. Existing data is never overwritten.
+            Default: only new sessions and summaries are added. Use "Replace entire dataset" to start fresh from the backup.
           </p>
         </div>
 
@@ -529,15 +567,48 @@ export default function SettingsPage() {
           </label>
 
           <button
-            onClick={() => void handleRemoteSync()}
-            disabled={syncingRemote}
+            onClick={() => {
+              if (remoteSyncReplace && !confirmRemoteReplace) return;
+              void handleRemoteSync();
+            }}
+            disabled={syncingRemote || (remoteSyncReplace && !confirmRemoteReplace)}
             className="w-full sm:w-auto bg-cyan-600 hover:bg-cyan-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
           >
             {syncingRemote ? 'Syncing to remote...' : 'Sync Local Data To Remote'}
           </button>
 
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={remoteSyncReplace}
+                onChange={e => {
+                  setRemoteSyncReplace(e.target.checked);
+                  setConfirmRemoteReplace(false);
+                }}
+                className="rounded border-gray-600 bg-gray-800 text-red-600 focus:ring-red-500"
+              />
+              <span className="text-red-400">Replace remote data instead of merging</span>
+            </label>
+
+            {remoteSyncReplace && !confirmRemoteReplace && (
+              <div className="bg-red-950/60 border border-red-800 rounded-lg p-3 space-y-2">
+                <p className="text-sm text-red-300">⚠️ With this enabled, syncing will <strong>delete all existing sessions and summaries</strong> on the remote account and replace them with your local data.</p>
+                <button
+                  onClick={() => setConfirmRemoteReplace(true)}
+                  className="bg-red-700 hover:bg-red-800 text-white text-sm px-4 py-2 rounded-lg font-medium transition-colors"
+                >
+                  I understand, allow replace
+                </button>
+              </div>
+            )}
+            {remoteSyncReplace && confirmRemoteReplace && (
+              <p className="text-xs text-red-400">Replace mode active — remote data will be overwritten on sync.</p>
+            )}
+          </div>
+
           <p className="text-xs text-gray-500">
-            This logs into the remote LessonLens account, uploads a backup in one step, and merges new sessions and summaries into that account. Existing data on the remote is preserved.
+            Default: merges new sessions and summaries into the remote account. Existing data is preserved.
           </p>
 
           {remoteSyncStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{remoteSyncStatus}</div>}
