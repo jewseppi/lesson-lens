@@ -31,6 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await apiJson<{ access_token: string; user: User }>('/api/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
+      suppressUnauthorizedRedirect: true,
     });
     localStorage.setItem('token', data.access_token);
     setUser(data.user);
