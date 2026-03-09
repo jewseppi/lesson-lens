@@ -114,12 +114,3 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
-
-  deploy-preview:
-    name: Trigger Cloudflare Deploy
-    runs-on: ubuntu-latest
-    needs: [backend, frontend-unit, e2e]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Trigger Cloudflare Pages deploy
-        run: curl -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}"
