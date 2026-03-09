@@ -15,7 +15,7 @@ export default defineConfig({
   reporter: [['html', { open: 'never' }], ['list']],
   webServer: [
     {
-      command: 'cd api && ../.venv/bin/python -c "from app import app; app.run(port=5001)"',
+      command: 'cd api && python3 -m flask --app app run --port 5001',
       port: 5001,
       reuseExistingServer: true,
       timeout: 15_000,
