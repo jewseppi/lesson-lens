@@ -34,6 +34,14 @@ jobs:
         run: |
           rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
             --delete \
+            --filter "protect raw-exports/" \
+            --filter "protect processed/" \
+            --filter "protect summaries/" \
+            --filter "protect flashcards/" \
+            --filter "protect html/" \
+            --filter "protect api/*.db" \
+            --filter "protect api/*.db-shm" \
+            --filter "protect api/*.db-wal" \
             --exclude ".git" \
             --exclude ".github" \
             --exclude "web/node_modules" \
@@ -87,26 +95,3 @@ jobs:
             chmod 755 "$APP_ROOT" "$API_ROOT" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries" "$APP_ROOT/tmp"
             chmod 644 "$APP_ROOT/passenger_wsgi.py" "$APP_ROOT/.htaccess" "$API_ROOT/requirements.txt"
             touch "$APP_ROOT/tmp/restart.txt"
-
-      - name: Diagnostic check
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            APP_ROOT="${{ secrets.PASSENGER_APP_ROOT }}"
-            echo "=== DB tables ==="
-            sqlite3 "$APP_ROOT/api/lessonlens.db" ".tables"
-            echo "=== parse_runs ==="
-            sqlite3 "$APP_ROOT/api/lessonlens.db" "SELECT run_id, user_id, status, session_count, output_dir, created_at FROM parse_runs;"
-            echo "=== sessions count ==="
-            sqlite3 "$APP_ROOT/api/lessonlens.db" "SELECT COUNT(*) FROM sessions;"
-            echo "=== users ==="
-            sqlite3 "$APP_ROOT/api/lessonlens.db" "SELECT id, email FROM users;"
-            echo "=== processed dir ==="
-            ls -la "$APP_ROOT/processed/" 2>&1 || echo "(empty or missing)"
-            echo "=== raw-exports dir ==="
-            ls -la "$APP_ROOT/raw-exports/" 2>&1 || echo "(empty or missing)"
-            echo "=== uploads table ==="
-            sqlite3 "$APP_ROOT/api/lessonlens.db" "SELECT id, original_filename, user_id, created_at FROM uploads;" 2>&1 || echo "(no uploads table)"
