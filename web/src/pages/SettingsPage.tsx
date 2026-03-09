@@ -28,6 +28,17 @@ export default function SettingsPage() {
   const [exportingBackup, setExportingBackup] = useState(false);
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const [importingBackup, setImportingBackup] = useState(false);
+  const [previewingBackup, setPreviewingBackup] = useState(false);
+  const [backupPreview, setBackupPreview] = useState<{
+    incoming_session_count: number;
+    incoming_summary_count: number;
+    new_session_count: number;
+    new_summary_count: number;
+    skipped_session_count: number;
+    skipped_summary_count: number;
+    existing_session_count: number;
+    existing_summary_count: number;
+  } | null>(null);
   const [backupStatus, setBackupStatus] = useState('');
   const [backupError, setBackupError] = useState('');
   const [remoteBaseUrl, setRemoteBaseUrl] = useState(() => localStorage.getItem(REMOTE_URL_KEY) || '');
@@ -111,6 +122,35 @@ export default function SettingsPage() {
     }
   };
 
+  const handleBackupPreview = async () => {
+    if (!backupFile) {
+      setBackupError('Choose a backup .zip file first.');
+      return;
+    }
+
+    setPreviewingBackup(true);
+    setBackupError('');
+    setBackupStatus('');
+    setBackupPreview(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', backupFile);
+      const res = await apiFetch('/api/backup/import/preview', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Preview failed');
+      }
+      setBackupPreview(data);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : 'Preview failed');
+    } finally {
+      setPreviewingBackup(false);
+    }
+  };
+
   const handleBackupImport = async () => {
     if (!backupFile) {
       setBackupError('Choose a backup .zip file first.');
@@ -123,7 +163,7 @@ export default function SettingsPage() {
     try {
       const formData = new FormData();
       formData.append('file', backupFile);
-      formData.append('replace_existing', 'true');
+      formData.append('replace_existing', 'false');
       const res = await apiFetch('/api/backup/import', {
         method: 'POST',
         body: formData,
@@ -132,8 +172,15 @@ export default function SettingsPage() {
       if (!res.ok) {
         throw new Error(data.error || 'Backup import failed');
       }
-      setBackupStatus(`Imported ${data.session_count ?? 0} sessions and ${data.summary_count ?? 0} summaries into this account.`);
+
+      const parts: string[] = [];
+      if (data.session_count > 0) parts.push(`${data.session_count} new sessions`);
+      if (data.summary_count > 0) parts.push(`${data.summary_count} new summaries`);
+      if (data.skipped_session_count > 0) parts.push(`${data.skipped_session_count} sessions already existed`);
+      if (data.skipped_summary_count > 0) parts.push(`${data.skipped_summary_count} summaries already existed`);
+      setBackupStatus(parts.length > 0 ? `Import complete: ${parts.join(', ')}.` : data.message || 'Import complete.');
       setBackupFile(null);
+      setBackupPreview(null);
     } catch (err) {
       setBackupError(err instanceof Error ? err.message : 'Backup import failed');
     } finally {
@@ -160,16 +207,24 @@ export default function SettingsPage() {
         session_count: number;
         summary_count: number;
         remote_base_url: string;
+        skipped_session_count?: number;
+        skipped_summary_count?: number;
       }>('/api/backup/sync-remote', {
         method: 'POST',
         body: JSON.stringify({
           remote_base_url: remoteBaseUrl.trim(),
           remote_email: remoteEmail.trim(),
           remote_password: remotePassword,
-          replace_existing: true,
+          replace_existing: false,
         }),
       });
-      setRemoteSyncStatus(`${result.message}. Synced ${result.session_count} sessions and ${result.summary_count} summaries to ${result.remote_base_url}.`);
+
+      const parts: string[] = [];
+      parts.push(`${result.session_count} new sessions`);
+      parts.push(`${result.summary_count} new summaries`);
+      if (result.skipped_session_count) parts.push(`${result.skipped_session_count} sessions already existed`);
+      if (result.skipped_summary_count) parts.push(`${result.skipped_summary_count} summaries already existed`);
+      setRemoteSyncStatus(`Synced to ${result.remote_base_url}: ${parts.join(', ')}.`);
       setRemotePassword('');
     } catch (err) {
       setRemoteSyncError(err instanceof Error ? err.message : 'Remote sync failed');
@@ -356,7 +411,7 @@ export default function SettingsPage() {
         <div>
           <h2 className="text-lg font-semibold text-white">Backup and Restore</h2>
           <p className="text-sm text-gray-400 mt-1">
-            Export the current parsed dataset and imported/generated summaries from local, then restore that backup into the live app. Restoring replaces the current parsed data and summaries for this account.
+            Export the current parsed dataset and imported/generated summaries from local, then restore that backup into the live app. Only new sessions and summaries are added — existing data is never overwritten.
           </p>
         </div>
 
@@ -377,21 +432,55 @@ export default function SettingsPage() {
               type="file"
               accept="application/zip,.zip"
               className="block w-full text-sm text-gray-400 file:mr-4 file:rounded-lg file:border-0 file:bg-gray-800 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-gray-700"
-              onChange={e => setBackupFile(e.target.files?.[0] ?? null)}
-              disabled={importingBackup}
+              onChange={e => {
+                setBackupFile(e.target.files?.[0] ?? null);
+                setBackupPreview(null);
+                setBackupStatus('');
+                setBackupError('');
+              }}
+              disabled={importingBackup || previewingBackup}
             />
           </label>
 
-          <button
-            onClick={() => void handleBackupImport()}
-            disabled={importingBackup || !backupFile}
-            className="w-full sm:w-auto bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
-          >
-            {importingBackup ? 'Restoring backup...' : 'Restore Backup Into This Account'}
-          </button>
+          {!backupPreview && (
+            <button
+              onClick={() => void handleBackupPreview()}
+              disabled={previewingBackup || importingBackup || !backupFile}
+              className="w-full sm:w-auto bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+            >
+              {previewingBackup ? 'Analyzing backup...' : 'Preview Import'}
+            </button>
+          )}
+
+          {backupPreview && (
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 space-y-3">
+              <h4 className="text-sm font-semibold text-white">Import Preview</h4>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="text-gray-400">Sessions in backup:</div>
+                <div className="text-white">{backupPreview.incoming_session_count}</div>
+                <div className="text-gray-400">Summaries in backup:</div>
+                <div className="text-white">{backupPreview.incoming_summary_count}</div>
+                <div className="text-gray-400">Already on this account:</div>
+                <div className="text-yellow-400">{backupPreview.skipped_session_count} sessions, {backupPreview.skipped_summary_count} summaries</div>
+                <div className="text-gray-400">New (will be added):</div>
+                <div className="text-green-400">{backupPreview.new_session_count} sessions, {backupPreview.new_summary_count} summaries</div>
+              </div>
+              {backupPreview.new_session_count === 0 && backupPreview.new_summary_count === 0 ? (
+                <p className="text-sm text-yellow-400">Nothing new to import — everything in this backup already exists.</p>
+              ) : (
+                <button
+                  onClick={() => void handleBackupImport()}
+                  disabled={importingBackup}
+                  className="w-full sm:w-auto bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+                >
+                  {importingBackup ? 'Importing...' : `Import ${backupPreview.new_session_count} New Sessions & ${backupPreview.new_summary_count} Summaries`}
+                </button>
+              )}
+            </div>
+          )}
 
           <p className="text-xs text-gray-500">
-            Use this to move your local sessions and summaries into production. The backup does not include your password hash.
+            Only new sessions and summaries will be added. Existing data is never overwritten.
           </p>
         </div>
 
@@ -448,7 +537,7 @@ export default function SettingsPage() {
           </button>
 
           <p className="text-xs text-gray-500">
-            This logs into the remote LessonLens account, uploads a backup in one step, and replaces the remote parsed sessions and summaries for that account.
+            This logs into the remote LessonLens account, uploads a backup in one step, and merges new sessions and summaries into that account. Existing data on the remote is preserved.
           </p>
 
           {remoteSyncStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{remoteSyncStatus}</div>}

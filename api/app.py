@@ -789,7 +789,7 @@ def sync_backup_remote():
     remote_base_url = data.get("remote_base_url", "")
     remote_email = (data.get("remote_email", "") or "").strip().lower()
     remote_password = data.get("remote_password", "") or ""
-    replace_existing = bool(data.get("replace_existing", True))
+    replace_existing = bool(data.get("replace_existing", False))
 
     if not remote_base_url or not remote_email or not remote_password:
         return jsonify({"error": "Remote URL, email, and password are required"}), 400
@@ -858,11 +858,131 @@ def sync_backup_remote():
         conn.close()
 
 
+def _get_existing_session_ids(conn, user_id):
+    """Return a set of session_id strings the user already has."""
+    rows = conn.execute(
+        "SELECT DISTINCT s.session_id FROM sessions s"
+        " JOIN parse_runs pr ON s.run_id = pr.run_id"
+        " WHERE pr.user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {row["session_id"] for row in rows}
+
+
+def _get_existing_summary_session_ids(conn, user_id):
+    """Return a set of session_id strings that already have a summary."""
+    rows = conn.execute(
+        "SELECT DISTINCT session_id FROM lesson_summaries WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {row["session_id"] for row in rows}
+
+
+def _validate_backup_zip(raw_zip):
+    """Open and validate a backup zip, returning (archive, manifest, sessions_payload, sessions, parse_members, summary_payloads, raw_export_member)."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw_zip))
+    except zipfile.BadZipFile:
+        return None, "Backup file must be a valid .zip archive"
+
+    try:
+        manifest = _read_backup_json(archive, "manifest.json")
+    except ValueError as exc:
+        archive.close()
+        return None, str(exc)
+
+    if manifest.get("schema_version") != "lessonlens-backup.v1":
+        archive.close()
+        return None, "Unsupported backup schema"
+
+    try:
+        sessions_payload = _read_backup_json(archive, "parse/sessions.json")
+    except ValueError as exc:
+        archive.close()
+        return None, str(exc)
+
+    sessions = sessions_payload.get("sessions") or []
+    if not isinstance(sessions, list) or not sessions:
+        archive.close()
+        return None, "Backup does not contain any sessions"
+
+    parse_members = []
+    summary_payloads = {}
+    raw_export_member = None
+    for name in archive.namelist():
+        normalized = _normalize_backup_member(name)
+        if normalized.startswith("parse/") and not normalized.endswith("/"):
+            parse_members.append(normalized)
+        elif normalized.startswith("summaries/") and normalized.endswith(".json"):
+            sid = Path(normalized).stem
+            summary_payloads[sid] = json.loads(archive.read(name).decode("utf-8"))
+        elif normalized.startswith("raw-exports/") and not normalized.endswith("/") and raw_export_member is None:
+            raw_export_member = normalized
+
+    return (archive, manifest, sessions_payload, sessions, parse_members, summary_payloads, raw_export_member), None
+
+
+@app.route("/api/backup/import/preview", methods=["POST"])
+@jwt_required()
+def preview_backup_import():
+    """Analyze a backup zip against existing data and return what would be imported."""
+    email = get_jwt_identity()
+
+    if "file" not in request.files:
+        return jsonify({"error": "No backup file provided"}), 400
+    uploaded = request.files["file"]
+    if not uploaded.filename:
+        return jsonify({"error": "No backup file selected"}), 400
+
+    raw_zip = uploaded.read()
+    result = _validate_backup_zip(raw_zip)
+    parsed, error = result
+    if error:
+        return jsonify({"error": error}), 400
+
+    archive, manifest, _sessions_payload, sessions, _parse_members, summary_payloads, _raw_export_member = parsed
+
+    archive.close()
+
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        existing_session_ids = _get_existing_session_ids(conn, user["id"])
+        existing_summary_ids = _get_existing_summary_session_ids(conn, user["id"])
+
+        incoming_sessions = [s for s in sessions if s.get("message_count", 0) > 0]
+        incoming_session_ids = {s["session_id"] for s in incoming_sessions}
+        new_session_ids = incoming_session_ids - existing_session_ids
+        skipped_session_ids = incoming_session_ids & existing_session_ids
+
+        incoming_summary_ids = set(summary_payloads.keys())
+        new_summary_ids = incoming_summary_ids - existing_summary_ids
+        skipped_summary_ids = incoming_summary_ids & existing_summary_ids
+
+        return jsonify({
+            "incoming_session_count": len(incoming_sessions),
+            "incoming_summary_count": len(summary_payloads),
+            "new_session_count": len(new_session_ids),
+            "new_summary_count": len(new_summary_ids),
+            "skipped_session_count": len(skipped_session_ids),
+            "skipped_summary_count": len(skipped_summary_ids),
+            "existing_session_count": len(existing_session_ids),
+            "existing_summary_count": len(existing_summary_ids),
+            "new_session_ids": sorted(new_session_ids),
+            "skipped_session_ids": sorted(skipped_session_ids),
+        }), 200
+    finally:
+        conn.close()
+
+
 @app.route("/api/backup/import", methods=["POST"])
 @jwt_required()
 def import_backup():
     email = get_jwt_identity()
-    replace_existing = request.form.get("replace_existing", "true").lower() not in {"0", "false", "no"}
+    replace_existing = request.form.get("replace_existing", "false").lower() not in {"0", "false", "no"}
 
     if "file" not in request.files:
         return jsonify({"error": "No backup file provided"}), 400
@@ -872,43 +992,51 @@ def import_backup():
         return jsonify({"error": "No backup file selected"}), 400
 
     raw_zip = uploaded.read()
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(raw_zip))
-    except zipfile.BadZipFile:
-        return jsonify({"error": "Backup file must be a valid .zip archive"}), 400
+    result = _validate_backup_zip(raw_zip)
+    parsed, error = result
+    if error:
+        return jsonify({"error": error}), 400
+
+    archive, manifest, sessions_payload, sessions, parse_members, summary_payloads, raw_export_member = parsed
 
     conn = get_db()
     try:
         user = _load_user(conn, email)
         if not user:
+            archive.close()
             return jsonify({"error": "User not found"}), 404
 
         with archive:
-            manifest = _read_backup_json(archive, "manifest.json")
-            if manifest.get("schema_version") != "lessonlens-backup.v1":
-                return jsonify({"error": "Unsupported backup schema"}), 400
-
-            sessions_payload = _read_backup_json(archive, "parse/sessions.json")
-            sessions = sessions_payload.get("sessions") or []
-            if not isinstance(sessions, list) or not sessions:
-                return jsonify({"error": "Backup does not contain any sessions"}), 400
-
-            parse_members = []
-            summary_payloads = {}
-            raw_export_member = None
-            for name in archive.namelist():
-                normalized = _normalize_backup_member(name)
-                if normalized.startswith("parse/") and not normalized.endswith("/"):
-                    parse_members.append(normalized)
-                elif normalized.startswith("summaries/") and normalized.endswith(".json"):
-                    session_id = Path(normalized).stem
-                    summary_payloads[session_id] = json.loads(archive.read(name).decode("utf-8"))
-                elif normalized.startswith("raw-exports/") and not normalized.endswith("/") and raw_export_member is None:
-                    raw_export_member = normalized
-
             if replace_existing:
                 _delete_user_learning_data(conn, user["id"])
                 conn.commit()
+                existing_session_ids = set()
+                existing_summary_ids = set()
+            else:
+                existing_session_ids = _get_existing_session_ids(conn, user["id"])
+                existing_summary_ids = _get_existing_summary_session_ids(conn, user["id"])
+
+            # Filter sessions to only truly new ones in merge mode
+            candidate_sessions = [s for s in sessions if s.get("message_count", 0) > 0]
+            if replace_existing:
+                new_sessions = candidate_sessions
+            else:
+                new_sessions = [s for s in candidate_sessions if s["session_id"] not in existing_session_ids]
+
+            skipped_session_count = len(candidate_sessions) - len(new_sessions)
+
+            if not new_sessions and not replace_existing:
+                # Check if there are at least new summaries to import
+                new_summary_ids = set(summary_payloads.keys()) - existing_summary_ids
+                if not new_summary_ids:
+                    return jsonify({
+                        "message": "Nothing new to import — all sessions and summaries already exist.",
+                        "session_count": 0,
+                        "summary_count": 0,
+                        "skipped_session_count": skipped_session_count,
+                        "skipped_summary_count": len(summary_payloads),
+                        "replace_existing": False,
+                    }), 200
 
             os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
             os.makedirs(app.config["PROCESSED_FOLDER"], exist_ok=True)
@@ -934,7 +1062,7 @@ def import_backup():
             )
             upload_id = upload_row.lastrowid
 
-            import_run_id = datetime.now(timezone.utc).strftime("imported-%Y%m%d-%H%M%S")
+            import_run_id = datetime.now(timezone.utc).strftime("imported-%Y%m%d-%H%M%S") + f"-{uuid.uuid4().hex[:6]}"
             import_output_dir = Path(app.config["PROCESSED_FOLDER"]) / import_run_id
             import_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -950,9 +1078,7 @@ def import_backup():
             session_count = 0
             total_messages = 0
             total_lesson_messages = 0
-            for session in sessions:
-                if session.get("message_count", 0) == 0:
-                    continue
+            for session in new_sessions:
                 session_count += 1
                 total_messages += session.get("message_count", 0)
                 total_lesson_messages += session.get("lesson_content_count", 0)
@@ -975,9 +1101,7 @@ def import_backup():
                 ),
             )
 
-            for session in sessions:
-                if session.get("message_count", 0) == 0:
-                    continue
+            for session in new_sessions:
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, session_id, date, start_time, end_time,
@@ -1010,16 +1134,38 @@ def import_backup():
             }
 
             imported_summaries = 0
+            skipped_summary_count = 0
             for session_id, lesson_data in summary_payloads.items():
                 if lesson_data.get("schema_version") != "lesson-data.v1":
                     continue
-                if not conn.execute(
+                # In merge mode, skip summaries for sessions that already have one
+                if not replace_existing and session_id in existing_summary_ids:
+                    skipped_summary_count += 1
+                    continue
+                # For new sessions: check they were actually inserted in this run
+                # For existing sessions without summaries: find any matching session
+                session_row = conn.execute(
                     "SELECT 1 FROM sessions WHERE run_id = ? AND session_id = ?",
                     (import_run_id, session_id),
-                ).fetchone():
-                    continue
+                ).fetchone()
+                if not session_row and not replace_existing:
+                    # Session already existed from a prior run — attach summary to that run
+                    session_row = conn.execute(
+                        "SELECT s.run_id FROM sessions s"
+                        " JOIN parse_runs pr ON s.run_id = pr.run_id"
+                        " WHERE pr.user_id = ? AND s.session_id = ?"
+                        " LIMIT 1",
+                        (user["id"], session_id),
+                    ).fetchone()
+                    if not session_row:
+                        continue
+                    target_run_id = session_row["run_id"]
+                else:
+                    if not session_row:
+                        continue
+                    target_run_id = import_run_id
 
-                summary_dir = Path(app.config["SUMMARIES_FOLDER"]) / import_run_id / session_id
+                summary_dir = Path(app.config["SUMMARIES_FOLDER"]) / target_run_id / session_id
                 summary_dir.mkdir(parents=True, exist_ok=True)
                 lesson_path = summary_dir / "lesson-data.json"
                 lesson_path.write_text(json.dumps(lesson_data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1031,7 +1177,7 @@ def import_backup():
                     session_id,
                     provider=meta.get("provider") or "imported-backup",
                     model=meta.get("model") or "external-agent",
-                    run_id=import_run_id,
+                    run_id=target_run_id,
                     user_id=user["id"],
                 )
                 imported_summaries += 1
@@ -1039,6 +1185,8 @@ def import_backup():
             _track_event(conn, user["id"], "import_backup", {
                 "session_count": session_count,
                 "summary_count": imported_summaries,
+                "skipped_session_count": skipped_session_count,
+                "skipped_summary_count": skipped_summary_count,
                 "replace_existing": replace_existing,
             })
 
@@ -1046,6 +1194,8 @@ def import_backup():
                 "message": "Backup imported successfully",
                 "session_count": session_count,
                 "summary_count": imported_summaries,
+                "skipped_session_count": skipped_session_count,
+                "skipped_summary_count": skipped_summary_count,
                 "replace_existing": replace_existing,
             }), 201
     except ValueError as exc:
