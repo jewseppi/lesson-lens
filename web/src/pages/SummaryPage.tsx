@@ -62,6 +62,8 @@ export default function SummaryPage() {
     }
   };
 
+  const { zhClass } = useFontSize();
+
   if (loading) return <div className="text-gray-400">Loading summary...</div>;
 
   if (noSummary && !summary) {
@@ -109,8 +111,6 @@ export default function SummaryPage() {
     );
   }
   if (!summary) return null;
-
-  const { zhClass } = useFontSize();
   const hasVocabularyZhuyin = summary.vocabulary.some(item => Boolean(item.zhuyin));
 
   return (
