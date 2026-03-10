@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { apiJson } from '../api';
+import { apiJson, apiFetch } from '../api';
 import { useFontSize } from '../FontSizeContext';
-import type { SessionDetail, Message, SharedLink } from '../types';
+import type { SessionDetail, Message, SharedLink, SessionAttachment } from '../types';
 
 export default function SessionDetailPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+  const [attachments, setAttachments] = useState<SessionAttachment[]>([]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -20,6 +21,9 @@ export default function SessionDetailPage() {
         }
       })
       .finally(() => setLoading(false));
+    apiJson<{ attachments: SessionAttachment[] }>(`/api/sessions/${sessionId}/attachments`)
+      .then(data => setAttachments(data.attachments))
+      .catch(() => {});
   }, [sessionId]);
 
   if (loading) return <div className="text-gray-400">Loading...</div>;
@@ -55,6 +59,13 @@ export default function SessionDetailPage() {
 
       {session.shared_links.length > 0 && (
         <SharedLinkPanel link={session.shared_links[0]} />
+      )}
+
+      {attachments.length > 0 && (
+        <AttachmentPanel attachments={attachments} sessionId={sessionId!} onRemove={(attId) => {
+          apiFetch(`/api/sessions/${sessionId}/attachments/${attId}`, { method: 'DELETE' })
+            .then(res => { if (res.ok) setAttachments(prev => prev.filter(a => a.attachment_id !== attId)); });
+        }} />
       )}
 
       {/* Filter toggle */}
@@ -134,6 +145,57 @@ function MessageBubble({ message: m }: { message: Message }) {
         ))}
       </div>
       <div className={`text-gray-200 whitespace-pre-wrap ${isLesson ? zhClass : ''}`}>{m.text_raw}</div>
+    </div>
+  );
+}
+
+const confidenceColors: Record<string, string> = {
+  high: 'bg-green-900/50 text-green-400 border-green-700',
+  medium: 'bg-yellow-900/50 text-yellow-400 border-yellow-700',
+  low: 'bg-orange-900/50 text-orange-400 border-orange-700',
+  unmatched: 'bg-gray-800 text-gray-400 border-gray-700',
+};
+
+function AttachmentPanel({ attachments, sessionId, onRemove }: {
+  attachments: SessionAttachment[];
+  sessionId: string;
+  onRemove: (attachmentId: number) => void;
+}) {
+  const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+
+  return (
+    <div className="rounded-xl border border-emerald-800/60 bg-emerald-950/20 p-4 space-y-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
+        📷 Lesson Photos ({attachments.length})
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        {attachments.map(att => (
+          <div key={att.attachment_id} className="relative group">
+            <img
+              src={`${API_BASE}/api/attachments/${att.attachment_id}/image`}
+              alt={att.original_filename}
+              className="w-full h-32 object-cover rounded-lg border border-gray-700"
+              loading="lazy"
+            />
+            <div className="mt-1 flex items-center gap-1">
+              <span className={`text-[10px] px-1.5 py-0.5 rounded border ${confidenceColors[att.match_confidence]}`}>
+                {att.match_confidence}
+              </span>
+              {att.assigned_by === 'manual' && (
+                <span className="text-[10px] text-gray-500">manual</span>
+              )}
+            </div>
+            <p className="text-[10px] text-gray-500 truncate">{att.original_filename}</p>
+            <button
+              onClick={() => onRemove(att.attachment_id)}
+              className="absolute top-1 right-1 hidden group-hover:block bg-black/70 text-red-400 text-xs rounded px-1.5 py-0.5 hover:text-red-300"
+              title="Remove from session"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
