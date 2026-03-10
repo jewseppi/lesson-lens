@@ -87,7 +87,7 @@ jobs:
           cache-dependency-path: api/requirements*.txt
 
       - name: Install backend dependencies
-        run: pip install -r api/requirements.txt
+        run: pip install -r api/requirements.txt -r api/requirements-dev.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4

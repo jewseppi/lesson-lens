@@ -69,3 +69,4 @@ export function trackEvent(eventType: string, eventData: Record<string, unknown>
     body: JSON.stringify({ event_type: eventType, event_data: eventData }),
   }).catch(() => {}); // fire-and-forget
 }
+

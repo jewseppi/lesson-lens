@@ -107,7 +107,7 @@ export default function SettingsPage() {
 
       const blob = await res.blob();
       const disposition = res.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^\"]+)"?/);
+      const match = disposition.match(/filename="?([^"]+)"?/);
       const filename = match?.[1] || 'lessonlens-backup.zip';
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
