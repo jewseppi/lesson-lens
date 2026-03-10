@@ -441,7 +441,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {(provider === 'ollama' || provider === 'openai_compatible_local') && (
+        {(provider === 'ollama' || provider === 'openai_compatible_local') && user?.is_admin && (
           <div className="border-t border-gray-800 pt-4 space-y-3">
             <button
               onClick={() => void checkLocalHealth()}
