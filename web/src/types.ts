@@ -160,3 +160,28 @@ export interface LessonSummary {
     quiz: QuizQuestion[];
   };
 }
+
+export interface AttachmentUploadResult {
+  filename: string;
+  attachment_id?: number;
+  status?: 'created' | 'duplicate';
+  error?: string;
+  timestamp_source?: string | null;
+  captured_at_local?: string | null;
+  match?: {
+    session_id: string | null;
+    confidence: 'high' | 'medium' | 'low' | 'unmatched';
+    reason: string;
+  };
+}
+
+export interface SessionAttachment {
+  session_attachment_id: number;
+  attachment_id: number;
+  original_filename: string;
+  mime_type: string;
+  captured_at_local: string | null;
+  match_confidence: 'high' | 'medium' | 'low' | 'unmatched';
+  match_reason: string;
+  assigned_by: 'auto' | 'manual';
+}
