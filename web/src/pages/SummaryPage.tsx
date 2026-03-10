@@ -4,12 +4,15 @@ import { apiJson, trackEvent } from '../api';
 import { useFontSize } from '../FontSizeContext';
 import type { LessonSummary } from '../types';
 
-type Provider = 'openai' | 'anthropic' | 'gemini';
+type Provider = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai_compatible_local';
 const STORAGE_KEY = 'lessonlens-provider';
+
+const ALL_PROVIDERS: Provider[] = ['openai', 'anthropic', 'gemini', 'ollama', 'openai_compatible_local'];
 
 function getStoredProvider(): Provider {
   const value = localStorage.getItem(STORAGE_KEY);
-  return value === 'anthropic' || value === 'gemini' ? value : 'openai';
+  if (value && ALL_PROVIDERS.includes(value as Provider)) return value as Provider;
+  return 'openai';
 }
 
 function PronunciationNote({ note }: { note?: string }) {

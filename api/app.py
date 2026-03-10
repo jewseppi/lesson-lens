@@ -215,20 +215,37 @@ def _load_generator_config(provider_override=None, model_override=None):
 
     gen_config = load_gen_config()
     gen_defaults = gen_config.get("generation", {})
+    local_defaults = gen_config.get("local", {})
     use_provider = provider_override or gen_defaults.get("default_provider", "openai")
-    use_model = model_override or gen_defaults.get("default_model", "gpt-4o")
+
+    # Resolve model: explicit override > env var > config default
+    if model_override:
+        use_model = model_override
+    elif use_provider == "ollama":
+        use_model = os.environ.get("OLLAMA_MODEL") or local_defaults.get("ollama_model", "qwen2.5:7b-instruct")
+    elif use_provider == "openai_compatible_local":
+        use_model = os.environ.get("LOCAL_OAI_MODEL") or local_defaults.get("openai_compatible_local_model", "local-model")
+    else:
+        use_model = gen_defaults.get("default_model", "gpt-4o")
+
     temperature = gen_defaults.get("temperature", 0.3)
 
     return process_session, gen_config, use_provider, use_model, temperature
 
 
+ALLOWED_PROVIDERS = {"openai", "anthropic", "gemini", "ollama", "openai_compatible_local"}
+
+
 def _validate_provider_credentials(provider_name):
+    if provider_name not in ALLOWED_PROVIDERS:
+        return f"Unknown provider '{provider_name}'. Supported: {', '.join(sorted(ALLOWED_PROVIDERS))}"
     if provider_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
         return "OPENAI_API_KEY not set. Export it before starting the server."
     if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         return "ANTHROPIC_API_KEY not set. Export it before starting the server."
     if provider_name == "gemini" and not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
         return "GEMINI_API_KEY or GOOGLE_API_KEY not set. Export it before starting the server."
+    # Local providers (ollama, openai_compatible_local) need no API key.
     return None
 
 
@@ -2696,6 +2713,39 @@ def create_invitation():
         return jsonify({"token": token, "email": invite_email, "expires_at": expires}), 201
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Local model health
+# ---------------------------------------------------------------------------
+@app.route("/api/models/local/health", methods=["GET"])
+@jwt_required()
+def local_model_health():
+    results = {}
+
+    # --- Ollama ---
+    ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    try:
+        req = urllib_request.Request(f"{ollama_base}/api/tags", method="GET")
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        model_names = [m.get("name", "") for m in data.get("models", [])]
+        results["ollama"] = {"ok": True, "base_url": ollama_base, "models": model_names}
+    except Exception as exc:
+        results["ollama"] = {"ok": False, "base_url": ollama_base, "error": str(exc)}
+
+    # --- OpenAI-compatible local ---
+    local_oai_base = os.environ.get("LOCAL_OAI_BASE_URL", "http://localhost:1234/v1").rstrip("/")
+    try:
+        req = urllib_request.Request(f"{local_oai_base}/models", method="GET")
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        model_ids = [m.get("id", "") for m in data.get("data", [])]
+        results["openai_compatible_local"] = {"ok": True, "base_url": local_oai_base, "models": model_ids}
+    except Exception as exc:
+        results["openai_compatible_local"] = {"ok": False, "base_url": local_oai_base, "error": str(exc)}
+
+    return jsonify(results)
 
 
 # ---------------------------------------------------------------------------

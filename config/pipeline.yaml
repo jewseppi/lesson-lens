@@ -45,3 +45,8 @@ generation:
   default_model: "gpt-4o"
   temperature: 0.3
   prompt_version: "v1"
+
+# Local provider defaults (used when provider is ollama or openai_compatible_local)
+local:
+  ollama_model: "qwen2.5:7b-instruct"
+  openai_compatible_local_model: "local-model"
