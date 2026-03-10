@@ -62,7 +62,7 @@ export default function SessionDetailPage() {
       )}
 
       {attachments.length > 0 && (
-        <AttachmentPanel attachments={attachments} sessionId={sessionId!} onRemove={(attId) => {
+        <AttachmentPanel attachments={attachments} onRemove={(attId) => {
           apiFetch(`/api/sessions/${sessionId}/attachments/${attId}`, { method: 'DELETE' })
             .then(res => { if (res.ok) setAttachments(prev => prev.filter(a => a.attachment_id !== attId)); });
         }} />
@@ -156,9 +156,8 @@ const confidenceColors: Record<string, string> = {
   unmatched: 'bg-gray-800 text-gray-400 border-gray-700',
 };
 
-function AttachmentPanel({ attachments, sessionId, onRemove }: {
+function AttachmentPanel({ attachments, onRemove }: {
   attachments: SessionAttachment[];
-  sessionId: string;
   onRemove: (attachmentId: number) => void;
 }) {
   const API_BASE = import.meta.env.VITE_API_BASE ?? '';
