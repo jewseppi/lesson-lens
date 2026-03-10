@@ -26,6 +26,7 @@ def test_dirs():
         "uploads": os.path.join(base, "raw-exports"),
         "processed": os.path.join(base, "processed"),
         "summaries": os.path.join(base, "summaries"),
+        "attachments": os.path.join(base, "attachments"),
     }
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
@@ -50,6 +51,8 @@ def test_app(tmp_path, test_dirs, monkeypatch):
     app.config["UPLOAD_FOLDER"] = test_dirs["uploads"]
     app.config["PROCESSED_FOLDER"] = test_dirs["processed"]
     app.config["SUMMARIES_FOLDER"] = test_dirs["summaries"]
+
+    monkeypatch.setattr(app_module, "ATTACHMENTS_FOLDER", test_dirs["attachments"])
 
     with app.app_context():
         init_db()

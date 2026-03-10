@@ -410,6 +410,37 @@ def init_db():
             ip_address TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            upload_id INTEGER,
+            stored_filename TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            captured_at_utc TEXT,
+            captured_at_local TEXT,
+            timezone_hint TEXT,
+            metadata_json TEXT DEFAULT '{}',
+            ingested_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (upload_id) REFERENCES uploads(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            attachment_id INTEGER NOT NULL,
+            match_confidence TEXT NOT NULL DEFAULT 'unmatched',
+            match_reason TEXT,
+            assigned_by TEXT DEFAULT 'auto',
+            assigned_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (attachment_id) REFERENCES attachments(id),
+            UNIQUE(session_id, attachment_id)
+        );
     """)
 
     # Migrations for existing databases
@@ -1990,6 +2021,331 @@ def generate_all_summaries():
             "generated": generated,
             "failures": failures,
         }), 200
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Attachment routes (Phase 0A)
+# ---------------------------------------------------------------------------
+ATTACHMENTS_FOLDER = str(ROOT_DIR / "attachments")
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".bmp"}
+
+
+@app.route("/api/attachments/upload", methods=["POST"])
+@jwt_required()
+def upload_attachments():
+    """Upload one or more images, extract EXIF, auto-match to sessions."""
+    from image_helpers import extract_exif_datetime, match_image_to_sessions, is_image_file
+
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        files = request.files.getlist("images")
+        if not files:
+            return jsonify({"error": "No images provided"}), 400
+
+        os.makedirs(ATTACHMENTS_FOLDER, exist_ok=True)
+
+        # Load sessions for auto-matching
+        run = _load_latest_completed_run(conn, user["id"])
+        sessions = []
+        if run:
+            rows = conn.execute(
+                "SELECT session_id, date, start_time, end_time FROM sessions WHERE user_id = ? AND run_id = ?",
+                (user["id"], run["run_id"]),
+            ).fetchall()
+            sessions = [dict(r) for r in rows]
+
+        results = []
+        for file in files:
+            if not file.filename:
+                continue
+
+            _, ext = os.path.splitext(file.filename)
+            if ext.lower() not in IMAGE_EXTENSIONS:
+                results.append({"filename": file.filename, "error": "unsupported_format"})
+                continue
+
+            original_name = secure_filename(file.filename) or "unnamed-image"
+            stored_name = f"{uuid.uuid4()}{ext.lower()}"
+            filepath = os.path.join(ATTACHMENTS_FOLDER, stored_name)
+            file.save(filepath)
+
+            file_hash = compute_file_hash(filepath)
+
+            # Check for duplicate
+            existing = conn.execute(
+                "SELECT id FROM attachments WHERE user_id = ? AND sha256 = ?",
+                (user["id"], file_hash),
+            ).fetchone()
+            if existing:
+                os.remove(filepath)
+                results.append({
+                    "filename": file.filename,
+                    "attachment_id": existing["id"],
+                    "status": "duplicate",
+                })
+                continue
+
+            # Extract EXIF metadata
+            exif = extract_exif_datetime(filepath)
+
+            mime_type = mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+
+            cursor = conn.execute(
+                """INSERT INTO attachments
+                   (user_id, stored_filename, original_filename, mime_type, sha256,
+                    captured_at_utc, captured_at_local, timezone_hint, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user["id"], stored_name, original_name, mime_type, file_hash,
+                 exif["captured_at_utc"], exif["captured_at_local"],
+                 exif["timezone_hint"], json.dumps(exif["metadata_json"])),
+            )
+            attachment_id = cursor.lastrowid
+
+            # Auto-match to session
+            match = match_image_to_sessions(exif["captured_at_local"], sessions)
+            session_attachment_id = None
+            if match["session_id"]:
+                sa_cursor = conn.execute(
+                    """INSERT OR IGNORE INTO session_attachments
+                       (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
+                       VALUES (?, ?, ?, ?, ?, 'auto')""",
+                    (user["id"], match["session_id"], attachment_id,
+                     match["confidence"], match["reason"]),
+                )
+                if sa_cursor.rowcount:
+                    session_attachment_id = sa_cursor.lastrowid
+
+            conn.commit()
+
+            results.append({
+                "filename": file.filename,
+                "attachment_id": attachment_id,
+                "status": "created",
+                "timestamp_source": exif["source"],
+                "captured_at_local": exif["captured_at_local"],
+                "match": {
+                    "session_id": match["session_id"],
+                    "confidence": match["confidence"],
+                    "reason": match["reason"],
+                    "session_attachment_id": session_attachment_id,
+                },
+            })
+
+        _track_event(conn, user["id"], "upload_images", {"count": len(results)})
+
+        return jsonify({"attachments": results}), 201
+    finally:
+        conn.close()
+
+
+@app.route("/api/attachments", methods=["GET"])
+@jwt_required()
+def list_attachments():
+    """List all attachments for the current user, with optional filter."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        filter_type = request.args.get("filter")  # 'unmatched', 'low', 'all'
+
+        if filter_type in ("unmatched", "low"):
+            # Get attachments not matched or with low confidence
+            if filter_type == "unmatched":
+                rows = conn.execute(
+                    """SELECT a.* FROM attachments a
+                       LEFT JOIN session_attachments sa ON a.id = sa.attachment_id AND sa.user_id = a.user_id
+                       WHERE a.user_id = ? AND sa.id IS NULL
+                       ORDER BY a.ingested_at DESC""",
+                    (user["id"],),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT DISTINCT a.* FROM attachments a
+                       LEFT JOIN session_attachments sa ON a.id = sa.attachment_id AND sa.user_id = a.user_id
+                       WHERE a.user_id = ? AND (sa.id IS NULL OR sa.match_confidence = 'low')
+                       ORDER BY a.ingested_at DESC""",
+                    (user["id"],),
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM attachments WHERE user_id = ? ORDER BY ingested_at DESC",
+                (user["id"],),
+            ).fetchall()
+
+        attachments = []
+        for r in rows:
+            # Get session assignments
+            assignments = conn.execute(
+                """SELECT sa.*, s.date, s.start_time, s.end_time
+                   FROM session_attachments sa
+                   JOIN sessions s ON sa.session_id = s.session_id AND sa.user_id = s.user_id
+                   WHERE sa.attachment_id = ? AND sa.user_id = ?""",
+                (r["id"], user["id"]),
+            ).fetchall()
+
+            attachments.append({
+                "id": r["id"],
+                "original_filename": r["original_filename"],
+                "mime_type": r["mime_type"],
+                "captured_at_local": r["captured_at_local"],
+                "captured_at_utc": r["captured_at_utc"],
+                "ingested_at": r["ingested_at"],
+                "sessions": [{
+                    "session_id": a["session_id"],
+                    "confidence": a["match_confidence"],
+                    "reason": a["match_reason"],
+                    "assigned_by": a["assigned_by"],
+                    "date": a["date"],
+                } for a in assignments],
+            })
+
+        return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/attachments/<int:attachment_id>/image", methods=["GET"])
+@jwt_required()
+def serve_attachment_image(attachment_id):
+    """Serve an attachment image file (user-scoped)."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        att = conn.execute(
+            "SELECT * FROM attachments WHERE id = ? AND user_id = ?",
+            (attachment_id, user["id"]),
+        ).fetchone()
+        if not att:
+            return jsonify({"error": "Attachment not found"}), 404
+
+        return send_from_directory(
+            ATTACHMENTS_FOLDER, att["stored_filename"],
+            mimetype=att["mime_type"],
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/attachments", methods=["GET"])
+@jwt_required()
+def get_session_attachments(session_id):
+    """Get all attachments for a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        rows = conn.execute(
+            """SELECT sa.id as sa_id, sa.match_confidence, sa.match_reason, sa.assigned_by, sa.assigned_at,
+                      a.id as attachment_id, a.original_filename, a.mime_type,
+                      a.captured_at_local, a.captured_at_utc, a.stored_filename
+               FROM session_attachments sa
+               JOIN attachments a ON sa.attachment_id = a.id
+               WHERE sa.session_id = ? AND sa.user_id = ?
+               ORDER BY a.captured_at_local ASC""",
+            (session_id, user["id"]),
+        ).fetchall()
+
+        attachments = [{
+            "session_attachment_id": r["sa_id"],
+            "attachment_id": r["attachment_id"],
+            "original_filename": r["original_filename"],
+            "mime_type": r["mime_type"],
+            "captured_at_local": r["captured_at_local"],
+            "match_confidence": r["match_confidence"],
+            "match_reason": r["match_reason"],
+            "assigned_by": r["assigned_by"],
+        } for r in rows]
+
+        return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/attachments/assign", methods=["POST"])
+@jwt_required()
+def assign_attachment(session_id):
+    """Manually assign an attachment to a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        data = request.get_json() or {}
+        attachment_id = data.get("attachment_id")
+        if not attachment_id:
+            return jsonify({"error": "attachment_id required"}), 400
+
+        # Verify attachment belongs to user
+        att = conn.execute(
+            "SELECT id FROM attachments WHERE id = ? AND user_id = ?",
+            (attachment_id, user["id"]),
+        ).fetchone()
+        if not att:
+            return jsonify({"error": "Attachment not found"}), 404
+
+        # Verify session belongs to user
+        sess = conn.execute(
+            "SELECT session_id FROM sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        ).fetchone()
+        if not sess:
+            return jsonify({"error": "Session not found"}), 404
+
+        try:
+            cursor = conn.execute(
+                """INSERT INTO session_attachments
+                   (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
+                   VALUES (?, ?, ?, 'high', 'manual_assignment', 'manual')""",
+                (user["id"], session_id, attachment_id),
+            )
+            conn.commit()
+            return jsonify({"session_attachment_id": cursor.lastrowid}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Already assigned"}), 409
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/attachments/<int:attachment_id>", methods=["DELETE"])
+@jwt_required()
+def unassign_attachment(session_id, attachment_id):
+    """Remove an attachment from a session (unassign)."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        result = conn.execute(
+            "DELETE FROM session_attachments WHERE session_id = ? AND attachment_id = ? AND user_id = ?",
+            (session_id, attachment_id, user["id"]),
+        )
+        if result.rowcount == 0:
+            return jsonify({"error": "Assignment not found"}), 404
+
+        conn.commit()
+        return jsonify({"status": "removed"}), 200
     finally:
         conn.close()
 
