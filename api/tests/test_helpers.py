@@ -117,7 +117,9 @@ class TestValidateProviderCredentials:
 
     def test_unknown_provider(self):
         from app import _validate_provider_credentials
-        assert _validate_provider_credentials("unknown") is None
+        err = _validate_provider_credentials("unknown")
+        assert err is not None
+        assert "Unknown provider" in err
 
 
 # ---------------------------------------------------------------------------

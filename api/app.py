@@ -215,20 +215,37 @@ def _load_generator_config(provider_override=None, model_override=None):
 
     gen_config = load_gen_config()
     gen_defaults = gen_config.get("generation", {})
+    local_defaults = gen_config.get("local", {})
     use_provider = provider_override or gen_defaults.get("default_provider", "openai")
-    use_model = model_override or gen_defaults.get("default_model", "gpt-4o")
+
+    # Resolve model: explicit override > env var > config default
+    if model_override:
+        use_model = model_override
+    elif use_provider == "ollama":
+        use_model = os.environ.get("OLLAMA_MODEL") or local_defaults.get("ollama_model", "qwen2.5:7b-instruct")
+    elif use_provider == "openai_compatible_local":
+        use_model = os.environ.get("LOCAL_OAI_MODEL") or local_defaults.get("openai_compatible_local_model", "local-model")
+    else:
+        use_model = gen_defaults.get("default_model", "gpt-4o")
+
     temperature = gen_defaults.get("temperature", 0.3)
 
     return process_session, gen_config, use_provider, use_model, temperature
 
 
+ALLOWED_PROVIDERS = {"openai", "anthropic", "gemini", "ollama", "openai_compatible_local"}
+
+
 def _validate_provider_credentials(provider_name):
+    if provider_name not in ALLOWED_PROVIDERS:
+        return f"Unknown provider '{provider_name}'. Supported: {', '.join(sorted(ALLOWED_PROVIDERS))}"
     if provider_name == "openai" and not os.environ.get("OPENAI_API_KEY"):
         return "OPENAI_API_KEY not set. Export it before starting the server."
     if provider_name == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         return "ANTHROPIC_API_KEY not set. Export it before starting the server."
     if provider_name == "gemini" and not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
         return "GEMINI_API_KEY or GOOGLE_API_KEY not set. Export it before starting the server."
+    # Local providers (ollama, openai_compatible_local) need no API key.
     return None
 
 
@@ -440,6 +457,18 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id),
             FOREIGN KEY (attachment_id) REFERENCES attachments(id),
             UNIQUE(session_id, attachment_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS generation_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'dispatched',
+            session_id_filter TEXT,
+            github_run_id TEXT,
+            dispatched_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            result_json TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
     """)
 
@@ -2694,6 +2723,174 @@ def create_invitation():
         )
         conn.commit()
         return jsonify({"token": token, "email": invite_email, "expires_at": expires}), 201
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Local model health
+# ---------------------------------------------------------------------------
+@app.route("/api/models/local/health", methods=["GET"])
+@jwt_required()
+def local_model_health():
+    results = {}
+
+    # --- Ollama ---
+    ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    try:
+        req = urllib_request.Request(f"{ollama_base}/api/tags", method="GET")
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        model_names = [m.get("name", "") for m in data.get("models", [])]
+        results["ollama"] = {"ok": True, "base_url": ollama_base, "models": model_names}
+    except Exception as exc:
+        results["ollama"] = {"ok": False, "base_url": ollama_base, "error": str(exc)}
+
+    # --- OpenAI-compatible local ---
+    local_oai_base = os.environ.get("LOCAL_OAI_BASE_URL", "http://localhost:1234/v1").rstrip("/")
+    try:
+        req = urllib_request.Request(f"{local_oai_base}/models", method="GET")
+        with urllib_request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        model_ids = [m.get("id", "") for m in data.get("data", [])]
+        results["openai_compatible_local"] = {"ok": True, "base_url": local_oai_base, "models": model_ids}
+    except Exception as exc:
+        results["openai_compatible_local"] = {"ok": False, "base_url": local_oai_base, "error": str(exc)}
+
+    return jsonify(results)
+
+
+# ---------------------------------------------------------------------------
+# Runner generation (GitHub Actions dispatch)
+# ---------------------------------------------------------------------------
+@app.route("/api/generation/dispatch", methods=["POST"])
+@jwt_required()
+def dispatch_runner_generation():
+    github_token = os.environ.get("GITHUB_TOKEN")
+    github_repo = os.environ.get("GITHUB_REPO")
+    if not github_token or not github_repo:
+        return jsonify({"error": "Runner generation not configured (GITHUB_TOKEN / GITHUB_REPO missing)"}), 501
+
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        data = request.get_json() or {}
+        session_id_filter = data.get("session_id", "")
+
+        # Trigger GitHub Actions workflow_dispatch
+        dispatch_url = f"https://api.github.com/repos/{github_repo}/actions/workflows/generate-local.yml/dispatches"
+        dispatch_body = json.dumps({
+            "ref": "main",
+            "inputs": {"session_id": session_id_filter or ""},
+        }).encode()
+        req = urllib_request.Request(
+            dispatch_url,
+            data=dispatch_body,
+            headers={
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except urllib_error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            return jsonify({"error": f"GitHub dispatch failed ({exc.code}): {body}"}), 502
+
+        # Record the job
+        conn.execute(
+            "INSERT INTO generation_jobs (user_id, status, session_id_filter) VALUES (?, 'dispatched', ?)",
+            (user["id"], session_id_filter or None),
+        )
+        conn.commit()
+        job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        return jsonify({"job_id": job_id, "message": "Generation dispatched to runner"}), 202
+    finally:
+        conn.close()
+
+
+@app.route("/api/generation/status", methods=["GET"])
+@jwt_required()
+def runner_generation_status():
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        row = conn.execute(
+            "SELECT * FROM generation_jobs WHERE user_id = ? ORDER BY dispatched_at DESC LIMIT 1",
+            (user["id"],),
+        ).fetchone()
+
+        if not row:
+            return jsonify({"status": "none"})
+
+        result = None
+        if row["result_json"]:
+            try:
+                result = json.loads(row["result_json"])
+            except (json.JSONDecodeError, TypeError):
+                result = None
+
+        return jsonify({
+            "job_id": row["id"],
+            "status": row["status"],
+            "session_id_filter": row["session_id_filter"],
+            "dispatched_at": row["dispatched_at"],
+            "completed_at": row["completed_at"],
+            "result": result,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/generation/webhook", methods=["POST"])
+def runner_generation_webhook():
+    expected_token = os.environ.get("GENERATION_WEBHOOK_TOKEN")
+    if not expected_token:
+        return jsonify({"error": "Webhook not configured"}), 501
+
+    provided_token = request.headers.get("X-Webhook-Token", "")
+    if provided_token != expected_token:
+        return jsonify({"error": "Invalid webhook token"}), 401
+
+    data = request.get_json() or {}
+    status = data.get("status", "completed")
+    result_json = json.dumps({
+        "generated": data.get("generated", 0),
+        "failed": data.get("failed", 0),
+        "imported": data.get("imported", 0),
+        "import_failed": data.get("import_failed", 0),
+        "total_missing": data.get("total_missing", 0),
+        "run_id": data.get("run_id"),
+    })
+
+    conn = get_db()
+    try:
+        # Update the latest dispatched/running job
+        conn.execute(
+            """UPDATE generation_jobs
+               SET status = ?, completed_at = datetime('now'), result_json = ?
+               WHERE id = (
+                   SELECT id FROM generation_jobs
+                   WHERE status IN ('dispatched', 'running')
+                   ORDER BY dispatched_at DESC LIMIT 1
+               )""",
+            (status, result_json),
+        )
+        conn.commit()
+        return jsonify({"message": "Job updated"})
     finally:
         conn.close()
 

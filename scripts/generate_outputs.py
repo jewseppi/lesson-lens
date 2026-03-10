@@ -103,10 +103,63 @@ def call_gemini(prompt: str, user_content: str, model: str, temperature: float) 
     return response.text
 
 
+def call_ollama(prompt: str, user_content: str, model: str, temperature: float) -> str:
+    import json as _json
+    from urllib import error as _urlerr
+    from urllib import request as _urlreq
+
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    payload = _json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "options": {"temperature": temperature},
+    }).encode()
+
+    req = _urlreq.Request(
+        f"{base_url}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=600) as resp:
+            data = _json.loads(resp.read())
+    except _urlerr.URLError as exc:
+        print(f"Error: cannot reach Ollama at {base_url}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    return data["message"]["content"]
+
+
+def call_openai_compatible_local(prompt: str, user_content: str, model: str, temperature: float) -> str:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("Error: openai package not installed. Run: pip install openai", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = os.environ.get("LOCAL_OAI_BASE_URL", "http://localhost:1234/v1")
+    client = OpenAI(api_key="not-needed", base_url=base_url)
+    response = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    return response.choices[0].message.content
+
+
 PROVIDERS = {
     "openai": call_openai,
     "anthropic": call_anthropic,
     "gemini": call_gemini,
+    "ollama": call_ollama,
+    "openai_compatible_local": call_openai_compatible_local,
 }
 
 

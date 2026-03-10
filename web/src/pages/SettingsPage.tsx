@@ -2,15 +2,25 @@ import { useState, type FormEvent } from 'react';
 import { apiFetch, apiJson } from '../api';
 import { useAuth } from '../AuthContext';
 
-type Provider = 'openai' | 'anthropic' | 'gemini';
+type Provider = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai_compatible_local';
 
 const STORAGE_KEY = 'lessonlens-provider';
 const REMOTE_URL_KEY = 'lessonlens-remote-url';
 const REMOTE_EMAIL_KEY = 'lessonlens-remote-email';
 
+const ALL_PROVIDERS: Provider[] = ['openai', 'anthropic', 'gemini', 'ollama', 'openai_compatible_local'];
+
 function getStoredProvider(): Provider {
   const value = localStorage.getItem(STORAGE_KEY);
-  return value === 'anthropic' || value === 'gemini' ? value : 'openai';
+  if (value && ALL_PROVIDERS.includes(value as Provider)) return value as Provider;
+  return 'openai';
+}
+
+interface LocalHealthResult {
+  ok: boolean;
+  base_url: string;
+  models?: string[];
+  error?: string;
 }
 
 export default function SettingsPage() {
@@ -56,6 +66,58 @@ export default function SettingsPage() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [passwordStatus, setPasswordStatus] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const [localHealth, setLocalHealth] = useState<{ ollama: LocalHealthResult; openai_compatible_local: LocalHealthResult } | null>(null);
+  const [healthChecking, setHealthChecking] = useState(false);
+  const [runnerDispatching, setRunnerDispatching] = useState(false);
+  const [runnerStatus, setRunnerStatus] = useState<{
+    job_id?: number;
+    status: string;
+    dispatched_at?: string;
+    completed_at?: string;
+    result?: { generated: number; failed: number; imported: number; import_failed: number; total_missing: number } | null;
+  } | null>(null);
+  const [runnerError, setRunnerError] = useState('');
+
+  const checkLocalHealth = async () => {
+    setHealthChecking(true);
+    try {
+      const data = await apiJson<{ ollama: LocalHealthResult; openai_compatible_local: LocalHealthResult }>('/api/models/local/health');
+      setLocalHealth(data);
+    } catch {
+      setLocalHealth(null);
+    } finally {
+      setHealthChecking(false);
+    }
+  };
+
+  const dispatchRunnerGeneration = async () => {
+    setRunnerDispatching(true);
+    setRunnerError('');
+    try {
+      await apiJson<{ job_id: number; message: string }>('/api/generation/dispatch', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      // Start polling status
+      void pollRunnerStatus();
+    } catch (err) {
+      setRunnerError(err instanceof Error ? err.message : 'Failed to dispatch runner');
+    } finally {
+      setRunnerDispatching(false);
+    }
+  };
+
+  const pollRunnerStatus = async () => {
+    try {
+      const data = await apiJson<typeof runnerStatus>('/api/generation/status');
+      setRunnerStatus(data);
+      if (data && (data.status === 'dispatched' || data.status === 'running')) {
+        setTimeout(() => void pollRunnerStatus(), 30_000);
+      }
+    } catch {
+      // Silently ignore poll failures
+    }
+  };
 
   const saveProvider = (next: Provider) => {
     setProvider(next);
@@ -318,38 +380,104 @@ export default function SettingsPage() {
             This provider will be used by default when generating a summary from the session page.
           </p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <button
-            onClick={() => saveProvider('openai')}
-            className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
-              provider === 'openai'
-                ? 'bg-green-900/50 border-green-600 text-green-300'
-                : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
-            }`}
-          >
-            OpenAI
-          </button>
-          <button
-            onClick={() => saveProvider('anthropic')}
-            className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
-              provider === 'anthropic'
-                ? 'bg-orange-900/50 border-orange-600 text-orange-300'
-                : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
-            }`}
-          >
-            Claude
-          </button>
-          <button
-            onClick={() => saveProvider('gemini')}
-            className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
-              provider === 'gemini'
-                ? 'bg-blue-900/50 border-blue-600 text-blue-300'
-                : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
-            }`}
-          >
-            Gemini
-          </button>
+        <div>
+          <p className="text-xs text-gray-500 mb-2">Cloud</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <button
+              onClick={() => saveProvider('openai')}
+              className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === 'openai'
+                  ? 'bg-green-900/50 border-green-600 text-green-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              OpenAI
+            </button>
+            <button
+              onClick={() => saveProvider('anthropic')}
+              className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === 'anthropic'
+                  ? 'bg-orange-900/50 border-orange-600 text-orange-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              Claude
+            </button>
+            <button
+              onClick={() => saveProvider('gemini')}
+              className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === 'gemini'
+                  ? 'bg-blue-900/50 border-blue-600 text-blue-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              Gemini
+            </button>
+          </div>
         </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-2">Local</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              onClick={() => saveProvider('ollama')}
+              className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === 'ollama'
+                  ? 'bg-purple-900/50 border-purple-600 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              Ollama
+            </button>
+            <button
+              onClick={() => saveProvider('openai_compatible_local')}
+              className={`py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === 'openai_compatible_local'
+                  ? 'bg-teal-900/50 border-teal-600 text-teal-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              Local OpenAI-Compatible
+            </button>
+          </div>
+        </div>
+
+        {(provider === 'ollama' || provider === 'openai_compatible_local') && (
+          <div className="border-t border-gray-800 pt-4 space-y-3">
+            <button
+              onClick={() => void checkLocalHealth()}
+              disabled={healthChecking}
+              className="w-full sm:w-auto bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            >
+              {healthChecking ? 'Checking...' : 'Check Local Runtime'}
+            </button>
+
+            {localHealth && (
+              <div className="space-y-2">
+                {(['ollama', 'openai_compatible_local'] as const).map(key => {
+                  const h = localHealth[key];
+                  return (
+                    <div key={key} className={`text-sm rounded-lg p-3 border ${h.ok ? 'bg-green-900/40 border-green-700 text-green-300' : 'bg-red-900/50 border-red-700 text-red-300'}`}>
+                      <span className="font-semibold">{key === 'ollama' ? 'Ollama' : 'OpenAI-Compatible'}</span>
+                      {' — '}
+                      {h.ok ? (
+                        <>Online at {h.base_url}{h.models && h.models.length > 0 && ` (${h.models.length} model${h.models.length === 1 ? '' : 's'})`}</>
+                      ) : (
+                        <>Unreachable at {h.base_url}. {provider === 'ollama' ? 'Is Ollama running? (ollama serve)' : 'Is your local server running?'}</>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-500">
+              {provider === 'ollama'
+                ? 'Ollama must be running locally. Default model: qwen2.5:7b-instruct. Override via OLLAMA_MODEL env var.'
+                : 'Point LOCAL_OAI_BASE_URL to your LM Studio / vLLM / llama.cpp server. Default: http://localhost:1234/v1.'}
+            </p>
+          </div>
+        )}
+
         {providerStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{providerStatus}</div>}
       </section>
 
@@ -638,6 +766,69 @@ export default function SettingsPage() {
 
         {bulkStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{bulkStatus}</div>}
         {bulkError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{bulkError}</div>}
+      </section>
+
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Generate Missing (Ollama Runner)</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Generate summaries using a free GitHub Actions runner with Ollama. Takes 5-10 minutes per session. No API keys needed.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={() => void dispatchRunnerGeneration()}
+            disabled={runnerDispatching || (runnerStatus?.status === 'dispatched') || (runnerStatus?.status === 'running')}
+            className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {runnerDispatching ? 'Dispatching...' : (runnerStatus?.status === 'dispatched' || runnerStatus?.status === 'running') ? 'Runner in progress...' : 'Generate Missing (Ollama Runner)'}
+          </button>
+          <button
+            onClick={() => void pollRunnerStatus()}
+            className="w-full sm:w-auto bg-gray-700 hover:bg-gray-600 text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors"
+          >
+            Check Status
+          </button>
+        </div>
+
+        {runnerStatus && runnerStatus.status !== 'none' && (
+          <div className={`text-sm rounded-lg p-3 border ${
+            runnerStatus.status === 'completed' ? 'bg-green-900/40 border-green-700 text-green-300' :
+            runnerStatus.status === 'completed_with_errors' ? 'bg-yellow-900/40 border-yellow-700 text-yellow-300' :
+            runnerStatus.status === 'failed' ? 'bg-red-900/50 border-red-700 text-red-300' :
+            'bg-blue-900/40 border-blue-700 text-blue-300'
+          }`}>
+            <span className="font-semibold">
+              {runnerStatus.status === 'dispatched' && 'Runner dispatched — waiting for GitHub Actions to start...'}
+              {runnerStatus.status === 'running' && 'Runner is generating summaries...'}
+              {runnerStatus.status === 'completed' && 'Generation complete'}
+              {runnerStatus.status === 'completed_with_errors' && 'Generation complete (with some errors)'}
+              {runnerStatus.status === 'failed' && 'Generation failed'}
+            </span>
+            {runnerStatus.dispatched_at && (
+              <span className="text-xs ml-2 opacity-75">
+                Dispatched {new Date(runnerStatus.dispatched_at + 'Z').toLocaleString()}
+              </span>
+            )}
+            {runnerStatus.result && (
+              <div className="mt-2 text-xs space-y-0.5">
+                <div>Generated: {runnerStatus.result.generated} / {runnerStatus.result.total_missing} missing</div>
+                <div>Imported: {runnerStatus.result.imported}</div>
+                {(runnerStatus.result.failed > 0 || runnerStatus.result.import_failed > 0) && (
+                  <div className="text-red-400">Failed: {runnerStatus.result.failed} generation, {runnerStatus.result.import_failed} import</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-xs text-gray-500">
+          Uses a GitHub Actions runner with Ollama (qwen2.5:7b-instruct). The runner downloads your sessions, generates summaries, and imports them back automatically.
+          {(runnerStatus?.status === 'dispatched' || runnerStatus?.status === 'running') && ' Status auto-refreshes every 30 seconds.'}
+        </p>
+
+        {runnerError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{runnerError}</div>}
       </section>
 
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">

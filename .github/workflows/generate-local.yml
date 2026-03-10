@@ -1,0 +1,203 @@
+name: Generate Summaries (Ollama Runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: "Session ID to generate (leave empty for all missing)"
+        required: false
+        default: ""
+
+env:
+  OLLAMA_MODEL: qwen2.5:7b-instruct
+
+jobs:
+  generate:
+    name: Generate with Ollama
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull model
+        run: |
+          ollama serve &
+          sleep 5
+          ollama pull "$OLLAMA_MODEL"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Login to hosted app
+        id: login
+        run: |
+          RESPONSE=$(curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"email\": \"${{ secrets.LESSONLENS_EMAIL }}\", \"password\": \"${{ secrets.LESSONLENS_PASSWORD }}\"}" \
+            "${{ secrets.LESSONLENS_API_URL }}/api/login")
+
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Download backup
+        run: |
+          curl -sf \
+            -H "Authorization: Bearer ${{ steps.login.outputs.token }}" \
+            -o backup.zip \
+            "${{ secrets.LESSONLENS_API_URL }}/api/backup/export"
+
+      - name: Extract and identify missing summaries
+        id: identify
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, zipfile
+
+          with zipfile.ZipFile("backup.zip", "r") as zf:
+              zf.extractall("backup")
+
+          # Load sessions
+          sessions_path = "backup/parse/sessions.json"
+          if not os.path.isfile(sessions_path):
+              print("No sessions.json found in backup")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("count=0\n")
+              exit(0)
+
+          with open(sessions_path) as f:
+              data = json.load(f)
+
+          sessions = data.get("sessions", [])
+
+          # Load manifest to find existing summaries
+          manifest_path = "backup/manifest.json"
+          existing_ids = set()
+          if os.path.isfile(manifest_path):
+              with open(manifest_path) as f:
+                  manifest = json.load(f)
+              for s in manifest.get("summaries", []):
+                  existing_ids.add(s.get("session_id", ""))
+
+          # Check for single session filter
+          filter_id = os.environ.get("INPUT_SESSION_ID", "").strip()
+
+          missing = []
+          for s in sessions:
+              sid = s["session_id"]
+              if filter_id and sid != filter_id:
+                  continue
+              if sid in existing_ids and not filter_id:
+                  continue
+              if s.get("lesson_content_count", 0) < 3:
+                  continue
+              missing.append(sid)
+
+          with open("missing.txt", "w") as f:
+              f.write("\n".join(missing))
+
+          print(f"Sessions to generate: {len(missing)}")
+          for sid in missing:
+              print(f"  - {sid}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"count={len(missing)}\n")
+          PYEOF
+        env:
+          INPUT_SESSION_ID: ${{ inputs.session_id }}
+
+      - name: Generate summaries
+        if: steps.identify.outputs.count != '0'
+        run: |
+          GENERATED=0
+          FAILED=0
+
+          while IFS= read -r SID; do
+            [ -z "$SID" ] && continue
+            echo "=== Generating: $SID ==="
+            if python scripts/generate_outputs.py \
+              --sessions backup/parse/sessions.json \
+              --session-id "$SID" \
+              --provider ollama \
+              --model "$OLLAMA_MODEL" \
+              --output-dir output/; then
+              GENERATED=$((GENERATED + 1))
+            else
+              echo "FAILED: $SID"
+              FAILED=$((FAILED + 1))
+            fi
+          done < missing.txt
+
+          echo "generated=$GENERATED" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "=== Done: $GENERATED generated, $FAILED failed ==="
+        id: generate
+
+      - name: Import results to hosted app
+        if: steps.identify.outputs.count != '0'
+        run: |
+          IMPORTED=0
+          IMPORT_FAILED=0
+
+          while IFS= read -r SID; do
+            [ -z "$SID" ] && continue
+            JSON_FILE="output/$SID/lesson-data.json"
+            if [ ! -f "$JSON_FILE" ]; then
+              continue
+            fi
+
+            echo "Importing: $SID"
+            HTTP_CODE=$(curl -s -o /tmp/import-response.json -w "%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer ${{ steps.login.outputs.token }}" \
+              -F "file=@$JSON_FILE" \
+              -F "provider=ollama-runner" \
+              -F "model=$OLLAMA_MODEL" \
+              "${{ secrets.LESSONLENS_API_URL }}/api/sessions/$SID/summary/import")
+
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              IMPORTED=$((IMPORTED + 1))
+            else
+              echo "IMPORT FAILED ($HTTP_CODE): $SID"
+              cat /tmp/import-response.json 2>/dev/null || true
+              IMPORT_FAILED=$((IMPORT_FAILED + 1))
+            fi
+          done < missing.txt
+
+          echo "=== Import done: $IMPORTED imported, $IMPORT_FAILED failed ==="
+          echo "imported=$IMPORTED" >> "$GITHUB_OUTPUT"
+          echo "import_failed=$IMPORT_FAILED" >> "$GITHUB_OUTPUT"
+        id: import
+
+      - name: Notify app of completion
+        if: always()
+        run: |
+          GENERATED="${{ steps.generate.outputs.generated || '0' }}"
+          FAILED="${{ steps.generate.outputs.failed || '0' }}"
+          IMPORTED="${{ steps.import.outputs.imported || '0' }}"
+          IMPORT_FAILED="${{ steps.import.outputs.import_failed || '0' }}"
+          TOTAL="${{ steps.identify.outputs.count || '0' }}"
+
+          STATUS="completed"
+          if [ "$FAILED" -gt 0 ] || [ "$IMPORT_FAILED" -gt 0 ]; then
+            STATUS="completed_with_errors"
+          fi
+          if [ "$TOTAL" = "0" ]; then
+            STATUS="completed"
+          fi
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Token: ${{ secrets.GENERATION_WEBHOOK_TOKEN }}" \
+            -d "{\"status\": \"$STATUS\", \"generated\": $GENERATED, \"failed\": $FAILED, \"imported\": $IMPORTED, \"import_failed\": $IMPORT_FAILED, \"total_missing\": $TOTAL, \"run_id\": \"${{ github.run_id }}\"}" \
+            "${{ secrets.LESSONLENS_API_URL }}/api/generation/webhook" || echo "Webhook notification failed (non-fatal)"
