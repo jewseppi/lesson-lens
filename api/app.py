@@ -74,7 +74,7 @@ CORS(app, origins=[
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
-    re.compile(r"https://[a-z0-9-]+\.pages\.dev"),
+    re.compile(r"https://([a-z0-9-]+\.)*pages\.dev"),
 ])
 
 DB_PATH = str(ROOT_DIR / "api" / "lessonlens.db")
