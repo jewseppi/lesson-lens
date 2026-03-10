@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import LoginPage from './pages/LoginPage';
+import RequestAccessPage from './pages/RequestAccessPage';
 import DashboardPage from './pages/DashboardPage';
 import SessionsPage from './pages/SessionsPage';
 import SessionDetailPage from './pages/SessionDetailPage';
@@ -8,6 +9,7 @@ import SummaryPage from './pages/SummaryPage';
 import StudyModePage from './pages/StudyModePage';
 import UploadPage from './pages/UploadPage';
 import SettingsPage from './pages/SettingsPage';
+import AdminPage from './pages/AdminPage';
 import Layout from './components/Layout';
 import { FontSizeProvider } from './FontSizeContext';
 
@@ -25,11 +27,13 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+      <Route path="/request-access" element={user ? <Navigate to="/" replace /> : <RequestAccessPage />} />
       <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/admin" element={<AdminPage />} />
         <Route path="/sessions/:sessionId" element={<SessionDetailPage />} />
         <Route path="/sessions/:sessionId/summary" element={<SummaryPage />} />
         <Route path="/sessions/:sessionId/study" element={<StudyModePage />} />
