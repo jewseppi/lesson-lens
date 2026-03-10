@@ -84,10 +84,10 @@ USER_EMAIL = "user@test.local"
 USER_PASSWORD = "TestUserP@ssword!Long456"
 
 
-def _seed_user(db, email, password, is_admin=0):
+def _seed_user(db, email, password, is_admin=0, status="active"):
     db.execute(
-        "INSERT INTO users (email, password_hash, display_name, is_admin) VALUES (?, ?, ?, ?)",
-        (email, generate_password_hash(password, method="scrypt"), email.split("@")[0], is_admin),
+        "INSERT INTO users (email, password_hash, display_name, is_admin, status) VALUES (?, ?, ?, ?, ?)",
+        (email, generate_password_hash(password, method="scrypt"), email.split("@")[0], is_admin, status),
     )
     db.commit()
     return db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()

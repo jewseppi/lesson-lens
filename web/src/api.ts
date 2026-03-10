@@ -1,6 +1,19 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 const PREVIEW_MODE = import.meta.env.VITE_PREVIEW_MODE === 'true';
 
+function resolveApiBase() {
+  const base = API_BASE.trim();
+  if (!base) return '';
+
+  // Preview deployments are HTTPS. If env accidentally uses http:// API URL,
+  // upgrade to https:// to avoid browser mixed-content/network failures.
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:' && base.startsWith('http://')) {
+    return `https://${base.slice('http://'.length)}`;
+  }
+
+  return base;
+}
+
 type ApiRequestOptions = RequestInit & {
   suppressUnauthorizedRedirect?: boolean;
 };
@@ -22,7 +35,14 @@ export async function apiFetch(path: string, options: ApiRequestOptions = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...requestOptions, headers });
+  const base = resolveApiBase();
+  const url = `${base}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { ...requestOptions, headers });
+  } catch {
+    throw new Error('Network error: cannot reach API. Check VITE_API_BASE and CORS/HTTPS settings for this preview.');
+  }
 
   // Keep login failures inline on the login page instead of forcing a hard redirect.
   if (res.status === 401 && !suppressUnauthorizedRedirect) {

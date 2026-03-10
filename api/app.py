@@ -74,7 +74,7 @@ CORS(app, origins=[
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
-    re.compile(r"https://[a-z0-9.-]+\.pages\.dev"),
+    re.compile(r"https://([a-z0-9-]+\.)*pages\.dev"),
 ])
 
 DB_PATH = str(ROOT_DIR / "api" / "lessonlens.db")
@@ -293,6 +293,11 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
     return lesson_data, use_provider, use_model
 
 
+def _table_has_column(conn, table, column):
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(c["name"] == column for c in cols)
+
+
 def init_db():
     conn = get_db()
     conn.executescript("""
@@ -302,6 +307,8 @@ def init_db():
             password_hash TEXT NOT NULL,
             display_name TEXT,
             is_admin INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            last_login_at TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
 
@@ -336,6 +343,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id TEXT NOT NULL,
+            user_id INTEGER,
             session_id TEXT NOT NULL,
             date TEXT NOT NULL,
             start_time TEXT,
@@ -344,7 +352,8 @@ def init_db():
             lesson_content_count INTEGER DEFAULT 0,
             boundary_confidence TEXT,
             topics_json TEXT DEFAULT '[]',
-            FOREIGN KEY (run_id) REFERENCES parse_runs(run_id)
+            FOREIGN KEY (run_id) REFERENCES parse_runs(run_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         CREATE TABLE IF NOT EXISTS lesson_summaries (
@@ -379,7 +388,44 @@ def init_db():
             created_by INTEGER,
             FOREIGN KEY (created_by) REFERENCES users(id)
         );
+
+        CREATE TABLE IF NOT EXISTS signup_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            display_name TEXT,
+            reason TEXT,
+            status TEXT DEFAULT 'pending',
+            reviewed_by INTEGER,
+            reviewed_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (reviewed_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            actor_id INTEGER,
+            event_type TEXT NOT NULL,
+            detail_json TEXT DEFAULT '{}',
+            ip_address TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
     """)
+
+    # Migrations for existing databases
+    if not _table_has_column(conn, "users", "status"):
+        conn.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active'")
+    if not _table_has_column(conn, "users", "last_login_at"):
+        conn.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT")
+    if not _table_has_column(conn, "sessions", "user_id"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER REFERENCES users(id)")
+        # Backfill user_id from parse_runs
+        conn.execute("""
+            UPDATE sessions SET user_id = (
+                SELECT pr.user_id FROM parse_runs pr WHERE pr.run_id = sessions.run_id
+            ) WHERE user_id IS NULL
+        """)
+
     conn.commit()
     conn.close()
 
@@ -671,7 +717,7 @@ def register():
             return jsonify({"error": "Email already registered"}), 409
 
         conn.execute(
-            "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
+            "INSERT INTO users (email, password_hash, display_name, status) VALUES (?, ?, ?, 'active')",
             (email, _password_hash(password), display_name),
         )
         conn.execute(
@@ -695,13 +741,24 @@ def login():
     try:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if user and check_password_hash(user["password_hash"], password):
+            status = user["status"] if "status" in user.keys() else "active"
+            if status != "active":
+                _log_security_event(conn, "login_blocked", user_id=user["id"], detail={"status": status})
+                conn.commit()
+                return jsonify({"error": "Account is not active", "status": status}), 403
             token = create_access_token(identity=email)
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now, user["id"]))
             _track_event(conn, user["id"], "login", {})
+            _log_security_event(conn, "login_success", user_id=user["id"])
+            conn.commit()
             return jsonify({"access_token": token, "user": {
                 "email": user["email"],
                 "display_name": user["display_name"],
                 "is_admin": bool(user["is_admin"]),
             }}), 200
+        _log_security_event(conn, "login_failed", detail={"email": email})
+        conn.commit()
         return jsonify({"error": "Invalid credentials"}), 401
     finally:
         conn.close()
@@ -726,9 +783,9 @@ def change_password():
 
     conn = get_db()
     try:
-        user = _load_user(conn, email)
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
         if not check_password_hash(user["password_hash"], current_password):
             return jsonify({"error": "Current password is incorrect"}), 401
 
@@ -761,13 +818,14 @@ def profile():
     email = get_jwt_identity()
     conn = get_db()
     try:
-        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
         return jsonify({
             "email": user["email"],
             "display_name": user["display_name"],
             "is_admin": bool(user["is_admin"]),
+            "status": user["status"] if "status" in user.keys() else "active",
         })
     finally:
         conn.close()
@@ -1119,11 +1177,12 @@ def import_backup():
             for session in new_sessions:
                 conn.execute(
                     """INSERT INTO sessions
-                       (run_id, session_id, date, start_time, end_time,
+                       (run_id, user_id, session_id, date, start_time, end_time,
                         message_count, lesson_content_count, boundary_confidence, topics_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         import_run_id,
+                        user["id"],
                         session["session_id"],
                         session["date"],
                         session.get("start_time"),
@@ -1394,10 +1453,10 @@ def parse_upload(upload_id):
                 continue
             conn.execute(
                 """INSERT INTO sessions
-                   (run_id, session_id, date, start_time, end_time,
+                   (run_id, user_id, session_id, date, start_time, end_time,
                     message_count, lesson_content_count, boundary_confidence, topics_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (run_id, sess["session_id"], sess["date"],
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, user["id"], sess["session_id"], sess["date"],
                  sess["start_time"], sess["end_time"],
                  sess["message_count"], sess["lesson_content_count"],
                  sess["boundary_confidence"], json.dumps([])),
@@ -1515,10 +1574,10 @@ def sync_file():
                 continue
             conn.execute(
                 """INSERT INTO sessions
-                   (run_id, session_id, date, start_time, end_time,
+                   (run_id, user_id, session_id, date, start_time, end_time,
                     message_count, lesson_content_count, boundary_confidence, topics_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (run_id, sess["session_id"], sess["date"],
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, user["id"], sess["session_id"], sess["date"],
                  sess["start_time"], sess["end_time"],
                  sess["message_count"], sess["lesson_content_count"],
                  sess["boundary_confidence"], json.dumps([])),
@@ -1946,6 +2005,27 @@ def _track_event(conn, user_id, event_type, event_data):
     conn.commit()
 
 
+def _log_security_event(conn, event_type, user_id=None, actor_id=None, detail=None):
+    ip = request.environ.get("HTTP_X_FORWARDED_FOR", request.remote_addr) if request else None
+    conn.execute(
+        "INSERT INTO security_events (user_id, actor_id, event_type, detail_json, ip_address) VALUES (?, ?, ?, ?, ?)",
+        (user_id, actor_id, event_type, json.dumps(detail or {}), ip),
+    )
+
+
+def _require_active_user(conn, email):
+    """Load user and verify their account status is 'active'. Returns (user, error_response)."""
+    user = _load_user(conn, email)
+    if not user:
+        return None, (jsonify({"error": "User not found"}), 404)
+    status = user["status"] if "status" in user.keys() else "active"
+    if status != "active":
+        _log_security_event(conn, "blocked_inactive", user_id=user["id"], detail={"status": status})
+        conn.commit()
+        return None, (jsonify({"error": "Account is not active", "status": status}), 403)
+    return user, None
+
+
 @app.route("/api/analytics/summary", methods=["GET"])
 @jwt_required()
 def analytics_summary():
@@ -2013,6 +2093,223 @@ def serve_spa(path):
         "error": "Frontend build not found",
         "hint": "Build the web app with `npm run build` in web/ before deploying.",
     }), 404
+
+
+# ---------------------------------------------------------------------------
+# Signup Requests (public)
+# ---------------------------------------------------------------------------
+@app.route("/api/signup-requests", methods=["POST"])
+@rate_limit(max_requests=3, window_seconds=600)
+def create_signup_request():
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+    display_name = data.get("display_name", "").strip()
+    reason = data.get("reason", "").strip()
+
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "Invalid email format"}), 400
+
+    conn = get_db()
+    try:
+        # Reject if already registered
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            return jsonify({"error": "Email already registered"}), 409
+
+        # Reject if a pending request already exists
+        pending = conn.execute(
+            "SELECT id FROM signup_requests WHERE email = ? AND status = 'pending'",
+            (email,),
+        ).fetchone()
+        if pending:
+            return jsonify({"error": "A request for this email is already pending"}), 409
+
+        conn.execute(
+            "INSERT INTO signup_requests (email, display_name, reason) VALUES (?, ?, ?)",
+            (email, display_name, reason),
+        )
+        _log_security_event(conn, "signup_request_created", detail={"email": email})
+        conn.commit()
+        return jsonify({"message": "Access request submitted. You will be notified by email when reviewed."}), 201
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin: Signup Request Management
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/signup-requests", methods=["GET"])
+@jwt_required()
+def list_signup_requests():
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        status_filter = request.args.get("status", "pending")
+        rows = conn.execute(
+            "SELECT * FROM signup_requests WHERE status = ? ORDER BY created_at DESC",
+            (status_filter,),
+        ).fetchall()
+        return jsonify([{
+            "id": r["id"],
+            "email": r["email"],
+            "display_name": r["display_name"],
+            "reason": r["reason"],
+            "status": r["status"],
+            "reviewed_by": r["reviewed_by"],
+            "reviewed_at": r["reviewed_at"],
+            "created_at": r["created_at"],
+        } for r in rows])
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/signup-requests/<int:req_id>/approve", methods=["POST"])
+@jwt_required()
+def approve_signup_request(req_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        req = conn.execute("SELECT * FROM signup_requests WHERE id = ?", (req_id,)).fetchone()
+        if not req:
+            return jsonify({"error": "Request not found"}), 404
+        if req["status"] != "pending":
+            return jsonify({"error": f"Request already {req['status']}"}), 409
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE signup_requests SET status = 'approved', reviewed_by = ?, reviewed_at = ? WHERE id = ?",
+            (admin["id"], now, req_id),
+        )
+
+        # Create invitation token for the approved user
+        token = str(uuid.uuid4())
+        expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        conn.execute(
+            "INSERT INTO invitation_tokens (email, token, expires_at, created_by) VALUES (?, ?, ?, ?)",
+            (req["email"], token, expires, admin["id"]),
+        )
+        _log_security_event(conn, "signup_request_approved", user_id=admin["id"], detail={"request_id": req_id, "email": req["email"]})
+        conn.commit()
+        return jsonify({"message": "Request approved", "invitation_token": token, "email": req["email"], "expires_at": expires}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/signup-requests/<int:req_id>/deny", methods=["POST"])
+@jwt_required()
+def deny_signup_request(req_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        req = conn.execute("SELECT * FROM signup_requests WHERE id = ?", (req_id,)).fetchone()
+        if not req:
+            return jsonify({"error": "Request not found"}), 404
+        if req["status"] != "pending":
+            return jsonify({"error": f"Request already {req['status']}"}), 409
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE signup_requests SET status = 'denied', reviewed_by = ?, reviewed_at = ? WHERE id = ?",
+            (admin["id"], now, req_id),
+        )
+        _log_security_event(conn, "signup_request_denied", user_id=admin["id"], detail={"request_id": req_id, "email": req["email"]})
+        conn.commit()
+        return jsonify({"message": "Request denied"}), 200
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin: User Management
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/users", methods=["GET"])
+@jwt_required()
+def list_users():
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        rows = conn.execute(
+            "SELECT id, email, display_name, is_admin, status, last_login_at, created_at FROM users ORDER BY created_at DESC"
+        ).fetchall()
+        return jsonify([{
+            "id": r["id"],
+            "email": r["email"],
+            "display_name": r["display_name"],
+            "is_admin": bool(r["is_admin"]),
+            "status": r["status"] or "active",
+            "last_login_at": r["last_login_at"],
+            "created_at": r["created_at"],
+        } for r in rows])
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/users/<int:user_id>/suspend", methods=["POST"])
+@jwt_required()
+def suspend_user(user_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        target = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+        if target["id"] == admin["id"]:
+            return jsonify({"error": "Cannot suspend yourself"}), 400
+        if (target["status"] or "active") == "suspended":
+            return jsonify({"error": "User is already suspended"}), 409
+
+        conn.execute("UPDATE users SET status = 'suspended' WHERE id = ?", (user_id,))
+        _log_security_event(conn, "user_suspended", user_id=user_id, actor_id=admin["id"])
+        conn.commit()
+        return jsonify({"message": "User suspended"}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/users/<int:user_id>/reactivate", methods=["POST"])
+@jwt_required()
+def reactivate_user(user_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        target = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+        if (target["status"] or "active") == "active":
+            return jsonify({"error": "User is already active"}), 409
+
+        conn.execute("UPDATE users SET status = 'active' WHERE id = ?", (user_id,))
+        _log_security_event(conn, "user_reactivated", user_id=user_id, actor_id=admin["id"])
+        conn.commit()
+        return jsonify({"message": "User reactivated"}), 200
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

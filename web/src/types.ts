@@ -2,6 +2,28 @@ export interface User {
   email: string;
   display_name: string;
   is_admin: boolean;
+  status?: string;
+}
+
+export interface SignupRequest {
+  id: number;
+  email: string;
+  display_name: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'denied';
+  reviewed_by: number | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  display_name: string;
+  is_admin: boolean;
+  status: string;
+  last_login_at: string | null;
+  created_at: string;
 }
 
 export interface Upload {
