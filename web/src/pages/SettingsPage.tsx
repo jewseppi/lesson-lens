@@ -68,6 +68,15 @@ export default function SettingsPage() {
   const [passwordError, setPasswordError] = useState('');
   const [localHealth, setLocalHealth] = useState<{ ollama: LocalHealthResult; openai_compatible_local: LocalHealthResult } | null>(null);
   const [healthChecking, setHealthChecking] = useState(false);
+  const [runnerDispatching, setRunnerDispatching] = useState(false);
+  const [runnerStatus, setRunnerStatus] = useState<{
+    job_id?: number;
+    status: string;
+    dispatched_at?: string;
+    completed_at?: string;
+    result?: { generated: number; failed: number; imported: number; import_failed: number; total_missing: number } | null;
+  } | null>(null);
+  const [runnerError, setRunnerError] = useState('');
 
   const checkLocalHealth = async () => {
     setHealthChecking(true);
@@ -78,6 +87,35 @@ export default function SettingsPage() {
       setLocalHealth(null);
     } finally {
       setHealthChecking(false);
+    }
+  };
+
+  const dispatchRunnerGeneration = async () => {
+    setRunnerDispatching(true);
+    setRunnerError('');
+    try {
+      await apiJson<{ job_id: number; message: string }>('/api/generation/dispatch', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      // Start polling status
+      void pollRunnerStatus();
+    } catch (err) {
+      setRunnerError(err instanceof Error ? err.message : 'Failed to dispatch runner');
+    } finally {
+      setRunnerDispatching(false);
+    }
+  };
+
+  const pollRunnerStatus = async () => {
+    try {
+      const data = await apiJson<typeof runnerStatus>('/api/generation/status');
+      setRunnerStatus(data);
+      if (data && (data.status === 'dispatched' || data.status === 'running')) {
+        setTimeout(() => void pollRunnerStatus(), 30_000);
+      }
+    } catch {
+      // Silently ignore poll failures
     }
   };
 
@@ -728,6 +766,69 @@ export default function SettingsPage() {
 
         {bulkStatus && <div className="bg-green-900/40 border border-green-700 text-green-300 text-sm rounded-lg p-3">{bulkStatus}</div>}
         {bulkError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{bulkError}</div>}
+      </section>
+
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Generate Missing (Ollama Runner)</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            Generate summaries using a free GitHub Actions runner with Ollama. Takes 5-10 minutes per session. No API keys needed.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={() => void dispatchRunnerGeneration()}
+            disabled={runnerDispatching || (runnerStatus?.status === 'dispatched') || (runnerStatus?.status === 'running')}
+            className="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-5 py-3 rounded-lg font-medium transition-colors"
+          >
+            {runnerDispatching ? 'Dispatching...' : (runnerStatus?.status === 'dispatched' || runnerStatus?.status === 'running') ? 'Runner in progress...' : 'Generate Missing (Ollama Runner)'}
+          </button>
+          <button
+            onClick={() => void pollRunnerStatus()}
+            className="w-full sm:w-auto bg-gray-700 hover:bg-gray-600 text-white px-4 py-3 rounded-lg text-sm font-medium transition-colors"
+          >
+            Check Status
+          </button>
+        </div>
+
+        {runnerStatus && runnerStatus.status !== 'none' && (
+          <div className={`text-sm rounded-lg p-3 border ${
+            runnerStatus.status === 'completed' ? 'bg-green-900/40 border-green-700 text-green-300' :
+            runnerStatus.status === 'completed_with_errors' ? 'bg-yellow-900/40 border-yellow-700 text-yellow-300' :
+            runnerStatus.status === 'failed' ? 'bg-red-900/50 border-red-700 text-red-300' :
+            'bg-blue-900/40 border-blue-700 text-blue-300'
+          }`}>
+            <span className="font-semibold">
+              {runnerStatus.status === 'dispatched' && 'Runner dispatched — waiting for GitHub Actions to start...'}
+              {runnerStatus.status === 'running' && 'Runner is generating summaries...'}
+              {runnerStatus.status === 'completed' && 'Generation complete'}
+              {runnerStatus.status === 'completed_with_errors' && 'Generation complete (with some errors)'}
+              {runnerStatus.status === 'failed' && 'Generation failed'}
+            </span>
+            {runnerStatus.dispatched_at && (
+              <span className="text-xs ml-2 opacity-75">
+                Dispatched {new Date(runnerStatus.dispatched_at + 'Z').toLocaleString()}
+              </span>
+            )}
+            {runnerStatus.result && (
+              <div className="mt-2 text-xs space-y-0.5">
+                <div>Generated: {runnerStatus.result.generated} / {runnerStatus.result.total_missing} missing</div>
+                <div>Imported: {runnerStatus.result.imported}</div>
+                {(runnerStatus.result.failed > 0 || runnerStatus.result.import_failed > 0) && (
+                  <div className="text-red-400">Failed: {runnerStatus.result.failed} generation, {runnerStatus.result.import_failed} import</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-xs text-gray-500">
+          Uses a GitHub Actions runner with Ollama (qwen2.5:7b-instruct). The runner downloads your sessions, generates summaries, and imports them back automatically.
+          {(runnerStatus?.status === 'dispatched' || runnerStatus?.status === 'running') && ' Status auto-refreshes every 30 seconds.'}
+        </p>
+
+        {runnerError && <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">{runnerError}</div>}
       </section>
 
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
