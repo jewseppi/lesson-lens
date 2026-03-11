@@ -1550,10 +1550,46 @@ def parse_upload(upload_id):
         conn.close()
 
 
+def _merge_sessions_json(existing_path, new_sessions):
+    """Merge new parsed sessions into an existing sessions.json file.
+
+    Adds sessions whose session_id doesn't already exist.  Returns
+    (merged_session_list, new_session_ids_set).
+    """
+    with open(existing_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    existing_sessions = data.get("sessions", [])
+    existing_ids = {s["session_id"] for s in existing_sessions}
+
+    added = []
+    for sess in new_sessions:
+        if sess["session_id"] not in existing_ids:
+            added.append(sess)
+
+    if added:
+        data["sessions"] = existing_sessions + added
+        old_stats = data.get("stats", {})
+        data["stats"] = {
+            "total_sessions": old_stats.get("total_sessions", 0) + len(added),
+            "total_messages": old_stats.get("total_messages", 0)
+            + sum(s.get("message_count", 0) for s in added),
+            "lesson_content_messages": old_stats.get("lesson_content_messages", 0)
+            + sum(s.get("lesson_content_count", 0) for s in added),
+        }
+        with open(existing_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    new_ids = {s["session_id"] for s in added}
+    return data["sessions"], new_ids
+
+
 @app.route("/api/sync", methods=["POST"])
 @jwt_required()
 def sync_file():
-    """Upload + parse in one step. If already uploaded, re-parse."""
+    """Upload + parse in one step.  Incremental: merges new sessions into
+    the user's existing canonical run so that previously generated summaries
+    are never deleted."""
     email = get_jwt_identity()
     conn = get_db()
     try:
@@ -1583,9 +1619,31 @@ def sync_file():
             (user["id"], file_hash),
         ).fetchone()
 
-        if existing:
+        is_duplicate_file = existing is not None
+        if is_duplicate_file:
             os.remove(filepath)
             upload_id = existing["id"]
+
+            # If this exact file was already parsed, return the existing
+            # run's stats as a no-op instead of deleting anything.
+            dup_run = conn.execute(
+                "SELECT run_id FROM parse_runs WHERE upload_id = ? AND status = 'completed'",
+                (upload_id,),
+            ).fetchone()
+            if dup_run:
+                total_sessions = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM sessions WHERE run_id = ? AND user_id = ?",
+                    (dup_run["run_id"], user["id"]),
+                ).fetchone()["cnt"]
+                return jsonify({
+                    "run_id": dup_run["run_id"],
+                    "session_count": total_sessions,
+                    "new_session_count": 0,
+                    "message_count": 0,
+                    "lesson_content_count": 0,
+                    "warnings": 0,
+                    "duplicate": True,
+                }), 200
         else:
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                 line_count = sum(1 for _ in f)
@@ -1597,7 +1655,7 @@ def sync_file():
             conn.commit()
             upload_id = cursor.lastrowid
 
-        # Now parse (force if already parsed)
+        # Parse the new file
         import sys as _sys
         scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
         if scripts_dir not in _sys.path:
@@ -1605,25 +1663,84 @@ def sync_file():
         from parse_line_export import load_config, parse_lines, write_outputs
         from extract_transcript import extract
 
-        # Clear old parse data for this upload
-        old_run = conn.execute(
-            "SELECT run_id FROM parse_runs WHERE upload_id = ? AND status = 'completed'",
-            (upload_id,),
-        ).fetchone()
-        if old_run:
-            old_run_id = old_run["run_id"]
-            conn.execute("DELETE FROM lesson_summaries WHERE run_id = ?", (old_run_id,))
-            conn.execute("DELETE FROM sessions WHERE run_id = ?", (old_run_id,))
-            conn.execute("DELETE FROM parse_runs WHERE run_id = ?", (old_run_id,))
-            conn.commit()
-
         upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
         filepath_parse = os.path.join(app.config["UPLOAD_FOLDER"], upload["stored_filename"])
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{upload_id}"
         config = load_config()
         source_meta = extract(filepath_parse)
         lines = source_meta.pop("lines")
         result = parse_lines(lines, source_meta, config)
+
+        # Check if user has an existing canonical run to merge into
+        canonical_run = _load_latest_completed_run(conn, user["id"])
+
+        if canonical_run:
+            # Merge new sessions into the existing run's sessions.json
+            existing_sessions_path = os.path.join(canonical_run["output_dir"], "sessions.json")
+            if os.path.isfile(existing_sessions_path):
+                _all_sessions, new_ids = _merge_sessions_json(
+                    existing_sessions_path, result["sessions"],
+                )
+                run_id = canonical_run["run_id"]
+
+                # Also write the new parse artifacts to a sub-directory for reference
+                temp_output = os.path.join(app.config["PROCESSED_FOLDER"], f"merge_{upload_id}")
+                write_outputs(result, source_meta, config, f"merge_{upload_id}", temp_output)
+
+                # Insert only genuinely new sessions into DB
+                inserted = 0
+                for sess in result["sessions"]:
+                    if sess["session_id"] not in new_ids:
+                        continue
+                    if sess["message_count"] == 0:
+                        continue
+                    conn.execute(
+                        """INSERT INTO sessions
+                           (run_id, user_id, session_id, date, start_time, end_time,
+                            message_count, lesson_content_count, boundary_confidence, topics_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (run_id, user["id"], sess["session_id"], sess["date"],
+                         sess["start_time"], sess["end_time"],
+                         sess["message_count"], sess["lesson_content_count"],
+                         sess["boundary_confidence"], json.dumps([])),
+                    )
+                    inserted += 1
+
+                # Update canonical run stats
+                if inserted:
+                    conn.execute(
+                        """UPDATE parse_runs SET
+                              session_count = session_count + ?,
+                              message_count = message_count + ?,
+                              lesson_content_count = lesson_content_count + ?
+                           WHERE run_id = ?""",
+                        (inserted,
+                         sum(s["message_count"] for s in result["sessions"] if s["session_id"] in new_ids),
+                         sum(s["lesson_content_count"] for s in result["sessions"] if s["session_id"] in new_ids),
+                         run_id),
+                    )
+                conn.commit()
+
+                total_sessions = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM sessions WHERE run_id = ? AND user_id = ?",
+                    (run_id, user["id"]),
+                ).fetchone()["cnt"]
+
+                _track_event(conn, user["id"], "sync", {
+                    "run_id": run_id, "new_sessions": inserted,
+                    "total_sessions": total_sessions, "merged": True,
+                })
+
+                return jsonify({
+                    "run_id": run_id,
+                    "session_count": total_sessions,
+                    "new_session_count": inserted,
+                    "message_count": result["stats"]["total_messages"],
+                    "lesson_content_count": result["stats"]["lesson_content_messages"],
+                    "warnings": len(result["warnings"]),
+                }), 201
+
+        # No existing run — create a fresh one (first-time sync)
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + f"_{upload_id}"
         output_dir = os.path.join(app.config["PROCESSED_FOLDER"], run_id)
         write_outputs(result, source_meta, config, run_id, output_dir)
 
@@ -1663,6 +1780,7 @@ def sync_file():
         return jsonify({
             "run_id": run_id,
             "session_count": inserted,
+            "new_session_count": inserted,
             "message_count": stats["total_messages"],
             "lesson_content_count": stats["lesson_content_messages"],
             "warnings": len(result["warnings"]),

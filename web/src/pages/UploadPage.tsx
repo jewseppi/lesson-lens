@@ -176,8 +176,13 @@ export default function UploadPage() {
                 <div className="font-medium text-gray-200 truncate">{r.filename}</div>
                 {r.ok && r.data ? (
                   <div className="mt-1 text-gray-400">
-                    {r.data.session_count} sessions, {r.data.message_count} messages, {r.data.lesson_content_count} lesson content, {r.data.warnings} warnings
-                    {r.data.duplicate && <span className="text-yellow-400"> (already parsed)</span>}
+                    {r.data.duplicate ? (
+                      <span>{r.data.session_count} sessions (already synced, no changes)</span>
+                    ) : r.data.new_session_count != null && r.data.new_session_count < r.data.session_count ? (
+                      <span>{r.data.new_session_count} new sessions added ({r.data.session_count} total), {r.data.message_count} messages, {r.data.lesson_content_count} lesson content, {r.data.warnings} warnings</span>
+                    ) : (
+                      <span>{r.data.session_count} sessions, {r.data.message_count} messages, {r.data.lesson_content_count} lesson content, {r.data.warnings} warnings</span>
+                    )}
                   </div>
                 ) : (
                   <div className="mt-1 text-red-400">{r.error || 'Sync failed'}</div>
