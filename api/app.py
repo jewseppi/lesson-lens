@@ -77,6 +77,16 @@ CORS(app, origins=[
     re.compile(r"https://([a-z0-9-]+\.)*pages\.dev"),
 ])
 
+
+@app.errorhandler(500)
+def handle_500(exc):
+    return jsonify({"error": "Internal server error"}), 500
+
+
+@app.errorhandler(413)
+def handle_413(exc):
+    return jsonify({"error": "File too large"}), 413
+
 DB_PATH = str(ROOT_DIR / "api" / "lessonlens.db")
 
 # ---------------------------------------------------------------------------

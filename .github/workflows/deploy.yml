@@ -41,6 +41,7 @@ jobs:
             --filter "protect summaries/" \
             --filter "protect flashcards/" \
             --filter "protect html/" \
+            --filter "protect api/attachments/" \
             --filter "protect api/*.db" \
             --filter "protect api/*.db-shm" \
             --filter "protect api/*.db-wal" \
@@ -72,7 +73,7 @@ jobs:
             API_ROOT="$APP_ROOT/api"
             PYTHON_ROOT="${{ secrets.PASSENGER_PYTHON_PATH }}"
 
-            mkdir -p "$APP_ROOT/tmp" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries"
+            mkdir -p "$APP_ROOT/tmp" "$APP_ROOT/raw-exports" "$APP_ROOT/processed" "$APP_ROOT/summaries" "$API_ROOT/attachments"
 
             cd "$API_ROOT"
             source "$PYTHON_ROOT/bin/activate"
