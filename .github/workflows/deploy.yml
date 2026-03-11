@@ -41,6 +41,7 @@ jobs:
             --filter "protect summaries/" \
             --filter "protect flashcards/" \
             --filter "protect html/" \
+            --filter "protect backups/" \
             --filter "protect api/attachments/" \
             --filter "protect api/*.db" \
             --filter "protect api/*.db-shm" \

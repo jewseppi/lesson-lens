@@ -258,7 +258,7 @@ class TestSyncFile:
         assert r.status_code == 400
 
     def test_sync_duplicate_file(self, client, db, admin_user, admin_token, test_dirs):
-        """Two syncs with same content should re-parse on the same upload."""
+        """Two syncs with same content returns 200 no-op (incremental sync)."""
         content = b"unique chat content for dup test\n"
 
         def _make_modules():
@@ -288,7 +288,8 @@ class TestSyncFile:
                 content_type="multipart/form-data",
                 headers=auth_header(admin_token),
             )
-        assert r2.status_code == 201
+        assert r2.status_code == 200
+        assert r2.get_json()["duplicate"] is True
 
 
 # ---------------------------------------------------------------------------

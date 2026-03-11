@@ -37,6 +37,7 @@ export interface Upload {
 export interface ParseResult {
   run_id: string;
   session_count: number;
+  new_session_count?: number;
   message_count: number;
   lesson_content_count: number;
   warnings: number;

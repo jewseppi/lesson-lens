@@ -1,0 +1,92 @@
+name: Nightly Backup
+
+on:
+  schedule:
+    # Run daily at 3:00 AM UTC (11 PM ET / 11 AM Taipei)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Login and download backup
+        id: download
+        run: |
+          set -euo pipefail
+
+          API_URL="${{ secrets.LESSONLENS_API_URL }}"
+
+          # Login
+          TOKEN=$(curl -sf -X POST "$API_URL/api/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\": \"${{ secrets.LESSONLENS_EMAIL }}\", \"password\": \"${{ secrets.LESSONLENS_PASSWORD }}\"}" \
+            | jq -r '.access_token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Login failed"
+            exit 1
+          fi
+
+          # Download backup ZIP
+          TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+          FILENAME="lessonlens-backup-${TIMESTAMP}.zip"
+
+          HTTP_CODE=$(curl -sf -w "%{http_code}" -o "$FILENAME" \
+            -H "Authorization: Bearer $TOKEN" \
+            "$API_URL/api/backup/export")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Backup download failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$FILENAME" 2>/dev/null || stat -f%z "$FILENAME")
+          echo "Downloaded $FILENAME ($SIZE bytes)"
+
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+
+      - name: Upload as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ steps.download.outputs.timestamp }}
+          path: ${{ steps.download.outputs.filename }}
+          retention-days: 90
+
+      - name: Store backup on server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            APP_ROOT="${{ secrets.PASSENGER_APP_ROOT }}"
+            BACKUP_DIR="$APP_ROOT/backups"
+            TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+
+            mkdir -p "$BACKUP_DIR"
+
+            # Copy the current processed data as a timestamped backup
+            if [ -d "$APP_ROOT/processed" ]; then
+              tar czf "$BACKUP_DIR/processed-${TIMESTAMP}.tar.gz" \
+                -C "$APP_ROOT" processed/
+              echo "Backed up processed/ -> processed-${TIMESTAMP}.tar.gz"
+            fi
+
+            # Also backup the database
+            DB_PATH="$APP_ROOT/api/lessonlens.db"
+            if [ -f "$DB_PATH" ]; then
+              cp "$DB_PATH" "$BACKUP_DIR/lessonlens-${TIMESTAMP}.db"
+              echo "Backed up database -> lessonlens-${TIMESTAMP}.db"
+            fi
+
+            # Rotate: keep only last 7 days of server backups
+            find "$BACKUP_DIR" -name "processed-*.tar.gz" -mtime +7 -delete 2>/dev/null || true
+            find "$BACKUP_DIR" -name "lessonlens-*.db" -mtime +7 -delete 2>/dev/null || true
+
+            echo "Server backups in $BACKUP_DIR:"
+            ls -lh "$BACKUP_DIR/" 2>/dev/null || echo "(empty)"
