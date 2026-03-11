@@ -550,6 +550,12 @@ def _load_user(conn, email):
 
 
 def _delete_user_learning_data(conn, user_id):
+    """Delete DB records for a user's learning data.
+
+    IMPORTANT: This only removes database rows.  The on-disk processed
+    artifacts (sessions.json, etc.) in the ``processed/`` directory are
+    intentionally preserved so data can be recovered if needed.
+    """
     run_ids = [row["run_id"] for row in conn.execute(
         "SELECT run_id FROM parse_runs WHERE user_id = ?",
         (user_id,),
@@ -1486,12 +1492,12 @@ def parse_upload(upload_id):
                 "duplicate": True,
             }), 200
 
-        # Clear old data if re-parsing
+        # Mark old run as superseded (not deleted) so data is recoverable
         if existing_run and force:
-            old_run_id = existing_run["run_id"]
-            conn.execute("DELETE FROM lesson_summaries WHERE run_id = ?", (old_run_id,))
-            conn.execute("DELETE FROM sessions WHERE run_id = ?", (old_run_id,))
-            conn.execute("DELETE FROM parse_runs WHERE run_id = ?", (old_run_id,))
+            conn.execute(
+                "UPDATE parse_runs SET status = 'superseded' WHERE run_id = ?",
+                (existing_run["run_id"],),
+            )
             conn.commit()
 
         filepath = os.path.join(app.config["UPLOAD_FOLDER"], upload["stored_filename"])
