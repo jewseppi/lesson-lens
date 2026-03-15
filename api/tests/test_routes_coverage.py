@@ -324,7 +324,7 @@ class TestGenerateSummary:
 
         # Mock _generate_summary_for_session to avoid real script imports
         with patch("app._generate_summary_for_session") as mock_gen:
-            mock_gen.return_value = (lesson_data, "openai", "gpt-4o")
+            mock_gen.return_value = (lesson_data, "openai", "gpt-4o", "allow", None)
             r = client.post(
                 "/api/sessions/2025-01-15/generate",
                 json={"provider": "openai", "model": "gpt-4o"},
@@ -403,7 +403,7 @@ class TestGenerateAllSummaries:
              patch("app._validate_provider_credentials", return_value=None), \
              patch("app._generate_summary_for_session") as mock_gen:
             mock_load_gen.return_value = (mock_process_session, mock_gen_config, "openai", "gpt-4o", 0.3)
-            mock_gen.return_value = (lesson_data, "openai", "gpt-4o")
+            mock_gen.return_value = (lesson_data, "openai", "gpt-4o", "allow", None)
 
             r = client.post(
                 "/api/summaries/generate",
@@ -425,7 +425,7 @@ class TestGenerateAllSummaries:
              patch("app._validate_provider_credentials", return_value=None), \
              patch("app._generate_summary_for_session") as mock_gen:
             mock_load_gen.return_value = (mock_process_session, {}, "openai", "gpt-4o", 0.3)
-            mock_gen.return_value = ({"title": "X"}, "openai", "gpt-4o")
+            mock_gen.return_value = ({"title": "X"}, "openai", "gpt-4o", "allow", None)
 
             r = client.post(
                 "/api/summaries/generate",
@@ -523,7 +523,7 @@ class TestGenerateAllSummaries:
              patch("app._validate_provider_credentials", return_value=None), \
              patch("app._generate_summary_for_session") as mock_gen:
             mock_load_gen.return_value = (mock_process_session, {}, "openai", "gpt-4o", 0.3)
-            mock_gen.return_value = ({"title": "new"}, "openai", "gpt-4o")
+            mock_gen.return_value = ({"title": "new"}, "openai", "gpt-4o", "allow", None)
 
             r = client.post(
                 "/api/summaries/generate",

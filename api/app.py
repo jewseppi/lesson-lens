@@ -287,6 +287,23 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
     if credential_error:
         raise ValueError(credential_error)
 
+    # --- Policy check ---
+    policy_action, policy_msg = _check_generation_policy(conn, use_provider, use_model)
+    if policy_action == "block":
+        raise ValueError(f"Policy blocked: {policy_msg}")
+    # "warn" is returned alongside the result for the frontend to display
+
+    session_id = session_row["session_id"]
+
+    # --- Load corrections from feedback signals and annotations ---
+    corrections = _load_corrections_for_session(conn, user["id"], session_id)
+
+    # --- Retrieve prior context for prompt injection (Phase 4) ---
+    retrieval_context = _retrieve_context_for_session(
+        conn, user["id"], session_id, session_data,
+    )
+    retrieval_block = build_retrieval_context_block(retrieval_context)
+
     gen_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     output_base = os.path.join(
         os.path.dirname(__file__), "..", "summaries", gen_run_id
@@ -300,6 +317,8 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
         temperature,
         gen_run_id,
         output_base,
+        corrections=corrections if corrections else None,
+        retrieval_context=retrieval_block if retrieval_block else None,
     )
 
     lesson_json_path = os.path.join(result["output_dir"], "lesson-data.json")
@@ -317,7 +336,323 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
         result["output_dir"],
     )
 
-    return lesson_data, use_provider, use_model
+    # --- Index retrieval items from this generation (Phase 4) ---
+    _index_retrieval_items(conn, user["id"], session_id, lesson_data)
+
+    # Mark annotations as applied after successful generation
+    if corrections:
+        conn.execute(
+            """UPDATE annotations SET status = 'applied', updated_at = datetime('now')
+               WHERE session_id = ? AND user_id = ? AND status = 'active'""",
+            (session_id, user["id"]),
+        )
+
+    return lesson_data, use_provider, use_model, policy_action, policy_msg
+
+
+def _load_corrections_for_session(conn, user_id, session_id):
+    """Load all accepted corrections for a session from feedback signals, AI reviews, and annotations."""
+    corrections = []
+
+    # 1. Accepted AI review parse findings (reclassifications)
+    review_rows = conn.execute(
+        """SELECT findings_json FROM ai_reviews
+           WHERE session_id = ? AND user_id = ? AND accepted_count > 0""",
+        (session_id, user_id),
+    ).fetchall()
+    for row in review_rows:
+        findings = json.loads(row["findings_json"])
+        for f in findings:
+            if f.get("status") != "accepted":
+                continue
+            if f.get("suggested_type"):
+                corrections.append({
+                    "type": "reclassify_message",
+                    "message_id": f.get("message_id"),
+                    "original": f.get("current_type"),
+                    "corrected": f.get("suggested_type"),
+                    "detail": f.get("reason", ""),
+                })
+
+    # 2. Feedback signals (manual reclassifications)
+    signal_rows = conn.execute(
+        """SELECT * FROM feedback_signals
+           WHERE session_id = ? AND user_id = ? AND signal_type = 'reclassify_message'""",
+        (session_id, user_id),
+    ).fetchall()
+    for sig in signal_rows:
+        corrections.append({
+            "type": "reclassify_message",
+            "message_id": sig["target_id"],
+            "original": sig["original_value"],
+            "corrected": sig["corrected_value"],
+        })
+
+    # 3. Active annotations (corrections, notes)
+    ann_rows = conn.execute(
+        """SELECT * FROM annotations
+           WHERE session_id = ? AND status = 'active'""",
+        (session_id,),
+    ).fetchall()
+    for ann in ann_rows:
+        content = json.loads(ann["content_json"])
+        atype = ann["annotation_type"]
+        if atype == "correction":
+            field = content.get("field", "")
+            ctype = "pinyin" if field == "pinyin" else ("translation" if field == "en" else "annotation")
+            corrections.append({
+                "type": ctype,
+                "item_id": ann["target_id"],
+                "original": content.get("original", ""),
+                "corrected": content.get("corrected", ""),
+                "detail": content.get("reason", ""),
+            })
+        elif atype == "reclassify":
+            corrections.append({
+                "type": "reclassify_message",
+                "message_id": ann["target_id"],
+                "original": content.get("original_type", ""),
+                "corrected": content.get("corrected_type", ""),
+            })
+        elif atype == "note" and content.get("text"):
+            corrections.append({
+                "type": "annotation",
+                "message_id": ann["target_id"],
+                "detail": f"User note on {ann['target_id']}: {content['text']}",
+            })
+
+    return corrections
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Retrieval Index + Feedback Memory
+# ---------------------------------------------------------------------------
+
+def _index_retrieval_items(conn, user_id, session_id, lesson_data):
+    """Extract vocab, key sentences, and corrections from a generated summary
+    and store them in the retrieval index for future context injection."""
+    # Clear old items for this session (regeneration)
+    conn.execute(
+        "DELETE FROM user_retrieval_items WHERE user_id = ? AND session_id = ?",
+        (user_id, session_id),
+    )
+
+    items = []
+
+    # Vocabulary
+    for v in lesson_data.get("vocabulary", []):
+        term = v.get("term", "")
+        if not term:
+            continue
+        items.append((
+            user_id, session_id, "vocab", term,
+            json.dumps({
+                "term": term,
+                "pinyin": v.get("pinyin", ""),
+                "meaning": v.get("meaning", ""),
+                "pos": v.get("pos", ""),
+                "example": v.get("example_sentence", ""),
+            }, ensure_ascii=False),
+            "generation",
+        ))
+
+    # Key sentences
+    for ks in lesson_data.get("key_sentences", []):
+        zh = ks.get("zh", "")
+        if not zh:
+            continue
+        items.append((
+            user_id, session_id, "key_sentence", zh,
+            json.dumps({
+                "zh": zh,
+                "pinyin": ks.get("pinyin", ""),
+                "en": ks.get("en", ""),
+                "context_note": ks.get("context_note", ""),
+            }, ensure_ascii=False),
+            "generation",
+        ))
+
+    # Corrections from summary (teacher corrections captured by LLM)
+    for c in lesson_data.get("corrections", []):
+        wrong = c.get("student_said", c.get("wrong", ""))
+        if not wrong:
+            continue
+        items.append((
+            user_id, session_id, "correction", wrong,
+            json.dumps({
+                "student_said": wrong,
+                "correct_form": c.get("correct_form", c.get("corrected", "")),
+                "explanation": c.get("explanation", c.get("detail", "")),
+            }, ensure_ascii=False),
+            "generation",
+        ))
+
+    if items:
+        conn.executemany(
+            """INSERT INTO user_retrieval_items
+               (user_id, session_id, item_type, item_key, item_data_json, source)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            items,
+        )
+
+    return len(items)
+
+
+def _record_feedback_memory(conn, user_id, session_id, action, target_type,
+                            target_id=None, original=None, corrected=None, detail=None):
+    """Record a user feedback action for retrieval memory."""
+    conn.execute(
+        """INSERT INTO user_feedback_memory
+           (user_id, session_id, action, target_type, target_id,
+            original_json, corrected_json, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            user_id, session_id, action, target_type, target_id,
+            json.dumps(original, ensure_ascii=False) if original else None,
+            json.dumps(corrected, ensure_ascii=False) if corrected else None,
+            detail,
+        ),
+    )
+
+
+def _retrieve_context_for_session(conn, user_id, session_id, session_data, max_items=20):
+    """Build retrieval context from prior sessions for prompt injection.
+
+    Strategy:
+    1. Find vocab terms from the current session transcript that appear in prior summaries.
+    2. Pull recent corrections the user has made (from feedback_memory).
+    3. Pull recent key sentences from adjacent sessions for continuity.
+    Returns a structured dict with sections for the prompt builder.
+    """
+    # Extract Chinese characters from current transcript for matching
+    current_terms = set()
+    for msg in session_data.get("messages", []):
+        text = msg.get("text_normalized", msg.get("text_raw", ""))
+        current_terms.update(_extract_cjk_tokens(text))
+
+    context = {
+        "prior_vocab": [],
+        "prior_corrections": [],
+        "prior_sentences": [],
+        "feedback_patterns": [],
+    }
+
+    if not current_terms:
+        return context
+
+    # 1. Find matching vocab from other sessions
+    vocab_rows = conn.execute(
+        """SELECT DISTINCT item_key, item_data_json, session_id
+           FROM user_retrieval_items
+           WHERE user_id = ? AND item_type = 'vocab' AND session_id != ?
+           ORDER BY created_at DESC
+           LIMIT 200""",
+        (user_id, session_id),
+    ).fetchall()
+
+    for row in vocab_rows:
+        term = row["item_key"]
+        if term in current_terms or any(term in t for t in current_terms):
+            data = json.loads(row["item_data_json"])
+            data["from_session"] = row["session_id"]
+            context["prior_vocab"].append(data)
+            if len(context["prior_vocab"]) >= max_items // 3:
+                break
+
+    # 2. Recent user corrections from feedback memory
+    correction_rows = conn.execute(
+        """SELECT corrected_json, detail, target_type, action, session_id
+           FROM user_feedback_memory
+           WHERE user_id = ? AND action IN ('correct', 'reclassify', 'accept_correction')
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (user_id, max_items // 3),
+    ).fetchall()
+
+    for row in correction_rows:
+        context["feedback_patterns"].append({
+            "action": row["action"],
+            "type": row["target_type"],
+            "corrected": json.loads(row["corrected_json"]) if row["corrected_json"] else None,
+            "detail": row["detail"],
+            "session_id": row["session_id"],
+        })
+
+    # 3. Key sentences from recent adjacent sessions (for continuity)
+    sentence_rows = conn.execute(
+        """SELECT item_key, item_data_json, session_id
+           FROM user_retrieval_items
+           WHERE user_id = ? AND item_type = 'key_sentence' AND session_id != ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (user_id, session_id, max_items // 3),
+    ).fetchall()
+
+    for row in sentence_rows:
+        data = json.loads(row["item_data_json"])
+        data["from_session"] = row["session_id"]
+        context["prior_sentences"].append(data)
+
+    # 4. Correction patterns from prior generations
+    corr_rows = conn.execute(
+        """SELECT item_key, item_data_json
+           FROM user_retrieval_items
+           WHERE user_id = ? AND item_type = 'correction' AND session_id != ?
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (user_id, session_id, max_items // 3),
+    ).fetchall()
+
+    for row in corr_rows:
+        data = json.loads(row["item_data_json"])
+        context["prior_corrections"].append(data)
+
+    return context
+
+
+def _extract_cjk_tokens(text):
+    """Extract CJK character sequences from text as simple tokens."""
+    import re
+    return set(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]{2,}', text))
+
+
+def build_retrieval_context_block(context):
+    """Format retrieval context as a text block for prompt injection."""
+    sections = []
+
+    if context.get("prior_vocab"):
+        lines = ["## Prior Vocabulary (from earlier lessons)",
+                 "The student has previously studied these terms. Reuse consistent translations:"]
+        for v in context["prior_vocab"]:
+            lines.append(f"- {v['term']} ({v.get('pinyin', '')}) = {v.get('meaning', '')} [{v.get('from_session', '')}]")
+        sections.append("\n".join(lines))
+
+    if context.get("prior_corrections"):
+        lines = ["## Common Student Errors",
+                 "The student has made these errors before. Watch for similar patterns:"]
+        for c in context["prior_corrections"]:
+            lines.append(f"- Said \"{c.get('student_said', '')}\" → should be \"{c.get('correct_form', '')}\" ({c.get('explanation', '')})")
+        sections.append("\n".join(lines))
+
+    if context.get("feedback_patterns"):
+        lines = ["## User Correction History",
+                 "The user has made these corrections to previous summaries:"]
+        for f in context["feedback_patterns"]:
+            detail = f.get("detail") or json.dumps(f.get("corrected"), ensure_ascii=False) or ""
+            lines.append(f"- {f['action']} ({f['type']}): {detail}")
+        sections.append("\n".join(lines))
+
+    if context.get("prior_sentences"):
+        lines = ["## Recent Key Sentences (from adjacent lessons)",
+                 "For continuity, here are sentences from recent lessons:"]
+        for s in context["prior_sentences"][:5]:  # limit to 5
+            lines.append(f"- {s.get('zh', '')} ({s.get('pinyin', '')}) = {s.get('en', '')}")
+        sections.append("\n".join(lines))
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections) + "\n"
 
 
 def _table_has_column(conn, table, column):
@@ -377,6 +712,9 @@ def init_db():
             end_time TEXT,
             message_count INTEGER DEFAULT 0,
             lesson_content_count INTEGER DEFAULT 0,
+            teacher_message_count INTEGER DEFAULT 0,
+            student_message_count INTEGER DEFAULT 0,
+            is_archived INTEGER DEFAULT 0,
             boundary_confidence TEXT,
             topics_json TEXT DEFAULT '[]',
             FOREIGN KEY (run_id) REFERENCES parse_runs(run_id),
@@ -480,6 +818,128 @@ def init_db():
             result_json TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
+
+        CREATE TABLE IF NOT EXISTS annotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_section TEXT,
+            annotation_type TEXT NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT DEFAULT 'active',
+            created_by_role TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotations_session ON annotations(session_id);
+
+        CREATE TABLE IF NOT EXISTS feedback_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            target_id TEXT,
+            original_value TEXT,
+            corrected_value TEXT,
+            context_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback_signals(session_id);
+
+        CREATE TABLE IF NOT EXISTS ai_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            review_type TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            findings_json TEXT NOT NULL DEFAULT '[]',
+            findings_count INTEGER DEFAULT 0,
+            accepted_count INTEGER DEFAULT 0,
+            dismissed_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS model_eval_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            language TEXT DEFAULT 'zh',
+            dataset_name TEXT DEFAULT 'default',
+            session_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            summary_json TEXT DEFAULT '{}',
+            started_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            error_message TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS model_eval_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eval_run_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL,
+            metric_meta_json TEXT DEFAULT '{}',
+            FOREIGN KEY (eval_run_id) REFERENCES model_eval_runs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_scores_run ON model_eval_scores(eval_run_id);
+
+        CREATE TABLE IF NOT EXISTS model_language_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            language TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model_pattern TEXT NOT NULL DEFAULT '*',
+            enabled INTEGER DEFAULT 1,
+            min_score REAL DEFAULT 0.0,
+            warning_threshold REAL DEFAULT 0.6,
+            block_threshold REAL DEFAULT 0.3,
+            fallback_provider TEXT,
+            fallback_model TEXT,
+            notes TEXT,
+            created_by INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (created_by) REFERENCES users(id),
+            UNIQUE(language, provider, model_pattern)
+        );
+
+        CREATE TABLE IF NOT EXISTS user_retrieval_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            item_data_json TEXT NOT NULL DEFAULT '{}',
+            source TEXT DEFAULT 'generation',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_retrieval_user ON user_retrieval_items(user_id, item_type);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_key ON user_retrieval_items(user_id, item_key);
+
+        CREATE TABLE IF NOT EXISTS user_feedback_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            original_json TEXT,
+            corrected_json TEXT,
+            detail TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_memory_user ON user_feedback_memory(user_id, target_type);
     """)
 
     # Migrations for existing databases
@@ -495,6 +955,16 @@ def init_db():
                 SELECT pr.user_id FROM parse_runs pr WHERE pr.run_id = sessions.run_id
             ) WHERE user_id IS NULL
         """)
+    if not _table_has_column(conn, "users", "role"):
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'student'")
+    if not _table_has_column(conn, "sessions", "teacher_message_count"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN teacher_message_count INTEGER DEFAULT 0")
+    if not _table_has_column(conn, "sessions", "student_message_count"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN student_message_count INTEGER DEFAULT 0")
+    if not _table_has_column(conn, "sessions", "is_archived"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN is_archived INTEGER DEFAULT 0")
+    if not _table_has_column(conn, "users", "native_language"):
+        conn.execute("ALTER TABLE users ADD COLUMN native_language TEXT")
 
     conn.commit()
     conn.close()
@@ -902,7 +1372,42 @@ def profile():
             "display_name": user["display_name"],
             "is_admin": bool(user["is_admin"]),
             "status": user["status"] if "status" in user.keys() else "active",
+            "native_language": user["native_language"] if "native_language" in user.keys() else None,
         })
+    finally:
+        conn.close()
+
+
+@app.route("/api/profile", methods=["PUT"])
+@jwt_required()
+def update_profile():
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        updates = []
+        params = []
+        if "display_name" in data:
+            dn = (data["display_name"] or "").strip()
+            if not dn:
+                return jsonify({"error": "display_name cannot be empty"}), 400
+            updates.append("display_name = ?")
+            params.append(dn)
+        if "native_language" in data:
+            updates.append("native_language = ?")
+            params.append(data["native_language"])
+
+        if not updates:
+            return jsonify({"error": "No fields to update"}), 400
+
+        params.append(user["id"])
+        conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return jsonify({"ok": True})
     finally:
         conn.close()
 
@@ -1254,8 +1759,9 @@ def import_backup():
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, user_id, session_id, date, start_time, end_time,
-                        message_count, lesson_content_count, boundary_confidence, topics_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        message_count, lesson_content_count, teacher_message_count, student_message_count,
+                        boundary_confidence, topics_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         import_run_id,
                         user["id"],
@@ -1265,6 +1771,8 @@ def import_backup():
                         session.get("end_time"),
                         session.get("message_count", 0),
                         session.get("lesson_content_count", 0),
+                        session.get("teacher_message_count", 0),
+                        session.get("student_message_count", 0),
                         session.get("boundary_confidence", "medium"),
                         json.dumps(session.get("topics", []), ensure_ascii=False),
                     ),
@@ -1530,14 +2038,23 @@ def parse_upload(upload_id):
             conn.execute(
                 """INSERT INTO sessions
                    (run_id, user_id, session_id, date, start_time, end_time,
-                    message_count, lesson_content_count, boundary_confidence, topics_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    message_count, lesson_content_count, teacher_message_count, student_message_count,
+                    boundary_confidence, topics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (run_id, user["id"], sess["session_id"], sess["date"],
                  sess["start_time"], sess["end_time"],
                  sess["message_count"], sess["lesson_content_count"],
+                 sess.get("teacher_message_count", 0), sess.get("student_message_count", 0),
                  sess["boundary_confidence"], json.dumps([])),
             )
             inserted_sessions += 1
+
+        # Auto-archive sessions with no teacher messages
+        conn.execute(
+            """UPDATE sessions SET is_archived = 1
+               WHERE run_id = ? AND user_id = ? AND teacher_message_count = 0""",
+            (run_id, user["id"]),
+        )
         conn.commit()
 
         _track_event(conn, user["id"], "parse", {
@@ -1702,11 +2219,13 @@ def sync_file():
                     conn.execute(
                         """INSERT INTO sessions
                            (run_id, user_id, session_id, date, start_time, end_time,
-                            message_count, lesson_content_count, boundary_confidence, topics_json)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            message_count, lesson_content_count, teacher_message_count, student_message_count,
+                            boundary_confidence, topics_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (run_id, user["id"], sess["session_id"], sess["date"],
                          sess["start_time"], sess["end_time"],
                          sess["message_count"], sess["lesson_content_count"],
+                         sess.get("teacher_message_count", 0), sess.get("student_message_count", 0),
                          sess["boundary_confidence"], json.dumps([])),
                     )
                     inserted += 1
@@ -1768,11 +2287,13 @@ def sync_file():
             conn.execute(
                 """INSERT INTO sessions
                    (run_id, user_id, session_id, date, start_time, end_time,
-                    message_count, lesson_content_count, boundary_confidence, topics_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    message_count, lesson_content_count, teacher_message_count, student_message_count,
+                    boundary_confidence, topics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (run_id, user["id"], sess["session_id"], sess["date"],
                  sess["start_time"], sess["end_time"],
                  sess["message_count"], sess["lesson_content_count"],
+                 sess.get("teacher_message_count", 0), sess.get("student_message_count", 0),
                  sess["boundary_confidence"], json.dumps([])),
             )
             inserted += 1
@@ -1831,12 +2352,42 @@ def list_sessions():
             (run["run_id"],),
         ).fetchall()
 
+        # Pre-load stale session IDs (sessions needing re-summarization)
+        stale_set = set()
+        # 1. Active correction/reclassify annotations
+        stale_rows = conn.execute(
+            """SELECT DISTINCT session_id FROM annotations
+               WHERE user_id = ? AND status = 'active'
+                 AND annotation_type IN ('correction', 'reclassify')""",
+            (user["id"],),
+        ).fetchall()
+        for sr in stale_rows:
+            stale_set.add(sr["session_id"])
+        # 2. Accepted AI review findings newer than latest summary
+        stale_rows2 = conn.execute(
+            """SELECT DISTINCT ar.session_id FROM ai_reviews ar
+               WHERE ar.user_id = ? AND ar.accepted_count > 0
+                 AND ar.created_at > COALESCE(
+                     (SELECT MAX(ls.created_at) FROM lesson_summaries ls
+                      WHERE ls.session_id = ar.session_id AND ls.user_id = ar.user_id),
+                     '1970-01-01')""",
+            (user["id"],),
+        ).fetchall()
+        for sr in stale_rows2:
+            stale_set.add(sr["session_id"])
+
+        # Determine min content threshold for "summarizable"
+        min_lc = 3
+
         sessions = []
         for r in rows:
             session_payload = sessions_by_id.get(r["session_id"], {})
             shared_links = _extract_session_links(session_payload)
             if session_payload and not (session_payload.get("message_count", 0) >= 3 or shared_links):
                 continue
+            has_summary = bool(r["has_summary"])
+            summarizable = r["lesson_content_count"] >= min_lc
+            is_archived = bool(r["is_archived"]) if "is_archived" in r.keys() else False
             sessions.append({
                 "id": r["id"],
                 "session_id": r["session_id"],
@@ -1845,9 +2396,14 @@ def list_sessions():
                 "end_time": r["end_time"],
                 "message_count": r["message_count"],
                 "lesson_content_count": r["lesson_content_count"],
+                "teacher_message_count": r["teacher_message_count"] if "teacher_message_count" in r.keys() else 0,
+                "student_message_count": r["student_message_count"] if "student_message_count" in r.keys() else 0,
+                "is_archived": is_archived,
                 "boundary_confidence": r["boundary_confidence"],
                 "topics": json.loads(r["topics_json"] or "[]"),
-                "has_summary": bool(r["has_summary"]),
+                "has_summary": has_summary,
+                "needs_summary": summarizable and not has_summary,
+                "summary_stale": has_summary and r["session_id"] in stale_set,
                 "shared_links": shared_links,
             })
         return jsonify(sessions)
@@ -2017,7 +2573,7 @@ def generate_summary(session_id):
         if not session_data:
             return jsonify({"error": "Session data not found"}), 404
 
-        lesson_data, use_provider, use_model = _generate_summary_for_session(
+        lesson_data, use_provider, use_model, p_action, p_msg = _generate_summary_for_session(
             conn,
             user,
             run,
@@ -2032,7 +2588,12 @@ def generate_summary(session_id):
             "session_id": session_id, "provider": use_provider, "model": use_model,
         })
 
-        return jsonify(lesson_data), 201
+        response = lesson_data
+        if p_action == "warn" and p_msg:
+            response = dict(lesson_data)
+            response["_policy_warning"] = p_msg
+
+        return jsonify(response), 201
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2118,7 +2679,7 @@ def generate_all_summaries():
                 continue
 
             try:
-                lesson_data, final_provider, final_model = _generate_summary_for_session(
+                lesson_data, final_provider, final_model, _, _ = _generate_summary_for_session(
                     conn,
                     user,
                     run,
@@ -2184,6 +2745,520 @@ def generate_all_summaries():
             "generated": generated,
             "failures": failures,
         }), 200
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Evaluation Harness routes (Phase 2)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/eval/runs", methods=["GET"])
+@jwt_required()
+def list_eval_runs():
+    """List all evaluation runs."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        rows = conn.execute(
+            """SELECT * FROM model_eval_runs ORDER BY started_at DESC"""
+        ).fetchall()
+
+        runs = []
+        for r in rows:
+            runs.append({
+                "id": r["id"],
+                "provider": r["provider"],
+                "model": r["model"],
+                "language": r["language"],
+                "dataset_name": r["dataset_name"],
+                "session_count": r["session_count"],
+                "status": r["status"],
+                "summary": json.loads(r["summary_json"] or "{}"),
+                "started_at": r["started_at"],
+                "completed_at": r["completed_at"],
+                "error_message": r["error_message"],
+            })
+        return jsonify(runs)
+    finally:
+        conn.close()
+
+
+@app.route("/api/eval/runs", methods=["POST"])
+@jwt_required()
+def start_eval_run():
+    """Start a new evaluation run (async-style: creates the record, actual running is via CLI)."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        provider = data.get("provider")
+        model = data.get("model")
+        if not provider or not model:
+            return jsonify({"error": "provider and model are required"}), 400
+
+        language = data.get("language", "zh")
+        dataset_name = data.get("dataset_name", "default")
+        max_sessions = data.get("max_sessions", 0)
+
+        conn.execute(
+            """INSERT INTO model_eval_runs (user_id, provider, model, language, dataset_name, session_count, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
+            (user["id"], provider, model, language, dataset_name, max_sessions),
+        )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+        _track_event(conn, user["id"], "eval_run_created", {
+            "eval_run_id": run_id, "provider": provider, "model": model,
+        })
+
+        return jsonify({"id": run_id, "status": "pending"}), 201
+    finally:
+        conn.close()
+
+
+@app.route("/api/eval/runs/<int:run_id>", methods=["GET"])
+@jwt_required()
+def get_eval_run(run_id):
+    """Get details of an evaluation run including per-session scores."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        run_row = conn.execute("SELECT * FROM model_eval_runs WHERE id = ?", (run_id,)).fetchone()
+        if not run_row:
+            return jsonify({"error": "Eval run not found"}), 404
+
+        scores = conn.execute(
+            "SELECT * FROM model_eval_scores WHERE eval_run_id = ? ORDER BY session_id, metric_name",
+            (run_id,),
+        ).fetchall()
+
+        # Group scores by session
+        by_session = {}
+        for s in scores:
+            sid = s["session_id"]
+            if sid not in by_session:
+                by_session[sid] = {}
+            by_session[sid][s["metric_name"]] = {
+                "value": s["metric_value"],
+                "meta": json.loads(s["metric_meta_json"] or "{}"),
+            }
+
+        return jsonify({
+            "id": run_row["id"],
+            "provider": run_row["provider"],
+            "model": run_row["model"],
+            "language": run_row["language"],
+            "dataset_name": run_row["dataset_name"],
+            "session_count": run_row["session_count"],
+            "status": run_row["status"],
+            "summary": json.loads(run_row["summary_json"] or "{}"),
+            "started_at": run_row["started_at"],
+            "completed_at": run_row["completed_at"],
+            "error_message": run_row["error_message"],
+            "scores_by_session": by_session,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/eval/scorecard", methods=["GET"])
+@jwt_required()
+def eval_scorecard():
+    """Get aggregate scorecard: avg metrics grouped by provider+model."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        rows = conn.execute(
+            """SELECT r.provider, r.model, r.language,
+                      s.metric_name,
+                      AVG(s.metric_value) as avg_value,
+                      COUNT(DISTINCT s.session_id) as session_count,
+                      COUNT(DISTINCT r.id) as run_count
+               FROM model_eval_runs r
+               JOIN model_eval_scores s ON s.eval_run_id = r.id
+               WHERE r.status = 'completed'
+               GROUP BY r.provider, r.model, r.language, s.metric_name
+               ORDER BY r.provider, r.model, s.metric_name"""
+        ).fetchall()
+
+        # Pivot into a model-centric structure
+        models = {}
+        for r in rows:
+            key = f"{r['provider']}/{r['model']}"
+            if key not in models:
+                models[key] = {
+                    "provider": r["provider"],
+                    "model": r["model"],
+                    "language": r["language"],
+                    "metrics": {},
+                    "session_count": r["session_count"],
+                    "run_count": r["run_count"],
+                }
+            models[key]["metrics"][r["metric_name"]] = round(r["avg_value"], 4)
+
+        return jsonify(list(models.values()))
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Policy Gating (Phase 3)
+# ---------------------------------------------------------------------------
+
+def _check_generation_policy(conn, provider, model, language="zh"):
+    """
+    Check if a provider/model/language combination is allowed.
+    Returns (action, message) where action is 'allow', 'warn', or 'block'.
+    """
+    # Find matching policies (exact model match or wildcard)
+    policies = conn.execute(
+        """SELECT * FROM model_language_policies
+           WHERE language = ? AND provider = ? AND enabled = 1
+           ORDER BY
+             CASE WHEN model_pattern = '*' THEN 1 ELSE 0 END,
+             model_pattern""",
+        (language, provider),
+    ).fetchall()
+
+    if not policies:
+        return "allow", None  # No policy = allow
+
+    import fnmatch
+    for p in policies:
+        pattern = p["model_pattern"]
+        if pattern == "*" or fnmatch.fnmatch(model.lower(), pattern.lower()):
+            # Look up average scores for this provider/model/language
+            score_row = conn.execute(
+                """SELECT AVG(s.metric_value) as avg_score
+                   FROM model_eval_scores s
+                   JOIN model_eval_runs r ON r.id = s.eval_run_id
+                   WHERE r.provider = ? AND r.model = ? AND r.language = ?
+                     AND r.status = 'completed'
+                     AND s.metric_name IN ('schema_valid', 'content_coverage', 'pedagogical_structure', 'hallucination_proxy')""",
+                (provider, model, language),
+            ).fetchone()
+
+            avg_score = score_row["avg_score"] if score_row and score_row["avg_score"] is not None else None
+
+            if avg_score is None:
+                # No eval data — check if policy requires minimum score
+                if p["min_score"] and p["min_score"] > 0:
+                    return "warn", (
+                        f"No evaluation data for {provider}/{model} ({language}). "
+                        f"Quality is unverified. Consider running an eval first."
+                    )
+                return "allow", None
+
+            if avg_score < p["block_threshold"]:
+                fallback_msg = ""
+                if p["fallback_provider"] and p["fallback_model"]:
+                    fallback_msg = f" Try {p['fallback_provider']}/{p['fallback_model']} instead."
+                return "block", (
+                    f"{provider}/{model} scored {avg_score:.0%} for {language} "
+                    f"(below {p['block_threshold']:.0%} threshold).{fallback_msg}"
+                )
+
+            if avg_score < p["warning_threshold"]:
+                return "warn", (
+                    f"{provider}/{model} scored {avg_score:.0%} for {language} "
+                    f"(below {p['warning_threshold']:.0%} recommended threshold). "
+                    f"Results may be lower quality."
+                )
+
+            return "allow", None
+
+    return "allow", None
+
+
+@app.route("/api/policies", methods=["GET"])
+@jwt_required()
+def list_policies():
+    """List all model-language policies."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        rows = conn.execute("SELECT * FROM model_language_policies ORDER BY language, provider, model_pattern").fetchall()
+        policies = []
+        for r in rows:
+            policies.append({
+                "id": r["id"],
+                "language": r["language"],
+                "provider": r["provider"],
+                "model_pattern": r["model_pattern"],
+                "enabled": bool(r["enabled"]),
+                "min_score": r["min_score"],
+                "warning_threshold": r["warning_threshold"],
+                "block_threshold": r["block_threshold"],
+                "fallback_provider": r["fallback_provider"],
+                "fallback_model": r["fallback_model"],
+                "notes": r["notes"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            })
+        return jsonify(policies)
+    finally:
+        conn.close()
+
+
+@app.route("/api/policies", methods=["POST"])
+@jwt_required()
+def create_policy():
+    """Create a new model-language policy."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        language = data.get("language")
+        provider = data.get("provider")
+        if not language or not provider:
+            return jsonify({"error": "language and provider are required"}), 400
+
+        model_pattern = data.get("model_pattern", "*")
+        try:
+            conn.execute(
+                """INSERT INTO model_language_policies
+                   (language, provider, model_pattern, enabled, min_score,
+                    warning_threshold, block_threshold, fallback_provider, fallback_model, notes, created_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    language, provider, model_pattern,
+                    1 if data.get("enabled", True) else 0,
+                    data.get("min_score", 0.0),
+                    data.get("warning_threshold", 0.6),
+                    data.get("block_threshold", 0.3),
+                    data.get("fallback_provider"),
+                    data.get("fallback_model"),
+                    data.get("notes"),
+                    user["id"],
+                ),
+            )
+            policy_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.commit()
+            return jsonify({"id": policy_id}), 201
+        except Exception as e:
+            if "UNIQUE" in str(e):
+                return jsonify({"error": "Policy already exists for this language/provider/model combination"}), 409
+            raise
+    finally:
+        conn.close()
+
+
+@app.route("/api/policies/<int:policy_id>", methods=["PUT"])
+@jwt_required()
+def update_policy(policy_id):
+    """Update an existing policy."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        existing = conn.execute("SELECT id FROM model_language_policies WHERE id = ?", (policy_id,)).fetchone()
+        if not existing:
+            return jsonify({"error": "Policy not found"}), 404
+
+        updates = []
+        params = []
+        for field in ["enabled", "min_score", "warning_threshold", "block_threshold",
+                       "fallback_provider", "fallback_model", "notes"]:
+            if field in data:
+                val = data[field]
+                if field == "enabled":
+                    val = 1 if val else 0
+                updates.append(f"{field} = ?")
+                params.append(val)
+
+        if not updates:
+            return jsonify({"error": "No fields to update"}), 400
+
+        updates.append("updated_at = datetime('now')")
+        params.append(policy_id)
+        conn.execute(f"UPDATE model_language_policies SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/policies/<int:policy_id>", methods=["DELETE"])
+@jwt_required()
+def delete_policy(policy_id):
+    """Delete a policy."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        existing = conn.execute("SELECT id FROM model_language_policies WHERE id = ?", (policy_id,)).fetchone()
+        if not existing:
+            return jsonify({"error": "Policy not found"}), 404
+
+        conn.execute("DELETE FROM model_language_policies WHERE id = ?", (policy_id,))
+        conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/policies/check", methods=["POST"])
+@jwt_required()
+def check_policy():
+    """Check if a provider/model/language combo is allowed by policy."""
+    data = request.get_json() or {}
+    provider = data.get("provider")
+    model = data.get("model")
+    language = data.get("language", "zh")
+
+    if not provider or not model:
+        return jsonify({"error": "provider and model required"}), 400
+
+    conn = get_db()
+    try:
+        action, message = _check_generation_policy(conn, provider, model, language)
+        return jsonify({"action": action, "message": message})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Retrieval Context routes (Phase 4)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/sessions/<session_id>/retrieval-context", methods=["GET"])
+@jwt_required()
+def get_retrieval_context(session_id):
+    """Preview the retrieval context that would be injected for a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        # Load session data
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"context": {}, "text": ""})
+
+        sessions_path = os.path.join(run["output_dir"], "sessions.json")
+        if not os.path.isfile(sessions_path):
+            return jsonify({"context": {}, "text": ""})
+
+        with open(sessions_path, "r", encoding="utf-8") as f:
+            sessions_data = json.load(f)
+
+        session_data = None
+        for s in sessions_data.get("sessions", []):
+            if s["session_id"] == session_id:
+                session_data = s
+                break
+
+        if not session_data:
+            return jsonify({"context": {}, "text": ""})
+
+        context = _retrieve_context_for_session(conn, user["id"], session_id, session_data)
+        text = build_retrieval_context_block(context)
+
+        return jsonify({
+            "context": context,
+            "text": text,
+            "stats": {
+                "prior_vocab": len(context.get("prior_vocab", [])),
+                "prior_corrections": len(context.get("prior_corrections", [])),
+                "prior_sentences": len(context.get("prior_sentences", [])),
+                "feedback_patterns": len(context.get("feedback_patterns", [])),
+            },
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/retrieval/stats", methods=["GET"])
+@jwt_required()
+def retrieval_stats():
+    """Get retrieval index stats for the current user."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        items = conn.execute(
+            """SELECT item_type, COUNT(*) as count
+               FROM user_retrieval_items
+               WHERE user_id = ?
+               GROUP BY item_type""",
+            (user["id"],),
+        ).fetchall()
+
+        feedback = conn.execute(
+            """SELECT action, COUNT(*) as count
+               FROM user_feedback_memory
+               WHERE user_id = ?
+               GROUP BY action""",
+            (user["id"],),
+        ).fetchall()
+
+        sessions_indexed = conn.execute(
+            """SELECT COUNT(DISTINCT session_id) as count
+               FROM user_retrieval_items WHERE user_id = ?""",
+            (user["id"],),
+        ).fetchone()
+
+        return jsonify({
+            "items_by_type": {row["item_type"]: row["count"] for row in items},
+            "feedback_by_action": {row["action"]: row["count"] for row in feedback},
+            "sessions_indexed": sessions_indexed["count"] if sessions_indexed else 0,
+            "total_items": sum(row["count"] for row in items),
+            "total_feedback": sum(row["count"] for row in feedback),
+        })
     finally:
         conn.close()
 
@@ -2514,6 +3589,666 @@ def unassign_attachment(session_id, attachment_id):
 
 
 # ---------------------------------------------------------------------------
+# Annotations
+# ---------------------------------------------------------------------------
+@app.route("/api/sessions/<session_id>/annotations", methods=["GET"])
+@jwt_required()
+def list_annotations(session_id):
+    """List annotations for a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        target_type = request.args.get("target_type")
+        query = "SELECT * FROM annotations WHERE session_id = ? AND user_id = ? AND status != 'dismissed'"
+        params = [session_id, user["id"]]
+        if target_type:
+            query += " AND target_type = ?"
+            params.append(target_type)
+        query += " ORDER BY created_at"
+        rows = conn.execute(query, params).fetchall()
+        return jsonify([{
+            "id": r["id"],
+            "session_id": r["session_id"],
+            "target_type": r["target_type"],
+            "target_id": r["target_id"],
+            "target_section": r["target_section"],
+            "annotation_type": r["annotation_type"],
+            "content": json.loads(r["content_json"]),
+            "status": r["status"],
+            "created_by_role": r["created_by_role"],
+            "created_at": r["created_at"],
+        } for r in rows])
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/annotations", methods=["POST"])
+@jwt_required()
+def create_annotation(session_id):
+    """Create an annotation on a message or summary item."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        required = ("target_type", "target_id", "annotation_type")
+        for field in required:
+            if field not in data:
+                return jsonify({"error": f"Missing field: {field}"}), 400
+
+        role = user["role"] if "role" in user.keys() else "student"
+        content = data.get("content", {})
+        cursor = conn.execute(
+            """INSERT INTO annotations
+               (user_id, session_id, target_type, target_id, target_section,
+                annotation_type, content_json, created_by_role)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user["id"], session_id, data["target_type"], data["target_id"],
+             data.get("target_section"), data["annotation_type"],
+             json.dumps(content, ensure_ascii=False), role),
+        )
+        # Record to feedback memory for retrieval (Phase 4)
+        ann_type = data["annotation_type"]
+        if ann_type in ("correction", "reclassify"):
+            action = "correct" if ann_type == "correction" else "reclassify"
+            _record_feedback_memory(
+                conn, user["id"], session_id, action,
+                target_type=data["target_type"],
+                target_id=data["target_id"],
+                original=content.get("original") or content.get("original_type"),
+                corrected=content.get("corrected") or content.get("corrected_type"),
+                detail=content.get("reason"),
+            )
+
+        conn.commit()
+        return jsonify({"id": cursor.lastrowid, "status": "created"}), 201
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/annotations/<int:annotation_id>", methods=["PUT"])
+@jwt_required()
+def update_annotation(session_id, annotation_id):
+    """Update an annotation."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        existing = conn.execute(
+            "SELECT * FROM annotations WHERE id = ? AND user_id = ? AND session_id = ?",
+            (annotation_id, user["id"], session_id),
+        ).fetchone()
+        if not existing:
+            return jsonify({"error": "Annotation not found"}), 404
+
+        updates = []
+        params = []
+        if "content" in data:
+            updates.append("content_json = ?")
+            params.append(json.dumps(data["content"], ensure_ascii=False))
+        if "status" in data:
+            updates.append("status = ?")
+            params.append(data["status"])
+        if "annotation_type" in data:
+            updates.append("annotation_type = ?")
+            params.append(data["annotation_type"])
+        if not updates:
+            return jsonify({"error": "No fields to update"}), 400
+
+        updates.append("updated_at = datetime('now')")
+        params.extend([annotation_id, user["id"]])
+        conn.execute(
+            f"UPDATE annotations SET {', '.join(updates)} WHERE id = ? AND user_id = ?",
+            params,
+        )
+        conn.commit()
+        return jsonify({"status": "updated"})
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/annotations/<int:annotation_id>", methods=["DELETE"])
+@jwt_required()
+def delete_annotation(session_id, annotation_id):
+    """Soft-delete an annotation (set status to dismissed)."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        result = conn.execute(
+            "UPDATE annotations SET status = 'dismissed', updated_at = datetime('now') WHERE id = ? AND user_id = ? AND session_id = ?",
+            (annotation_id, user["id"], session_id),
+        )
+        if result.rowcount == 0:
+            return jsonify({"error": "Annotation not found"}), 404
+        conn.commit()
+        return jsonify({"status": "dismissed"})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Re-parse
+# ---------------------------------------------------------------------------
+@app.route("/api/reparse", methods=["POST"])
+@jwt_required()
+def reparse_sessions():
+    """Re-parse all sessions using the current parser code.
+
+    Re-runs parse_lines() on stored upload files, updates sessions.json
+    and session metadata without deleting summaries or annotations.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        canonical_run = _load_latest_completed_run(conn, user["id"])
+        if not canonical_run:
+            return jsonify({"error": "No existing parse run"}), 404
+
+        # Find the most recent upload file
+        upload = conn.execute(
+            """SELECT u.* FROM uploads u
+               JOIN parse_runs pr ON pr.upload_id = u.id
+               WHERE pr.user_id = ? AND pr.status = 'completed'
+               ORDER BY u.id DESC LIMIT 1""",
+            (user["id"],),
+        ).fetchone()
+        if not upload:
+            return jsonify({"error": "No upload file found"}), 404
+
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], upload["stored_filename"])
+        if not os.path.isfile(filepath):
+            return jsonify({"error": "Upload file missing from disk"}), 404
+
+        # Import parser
+        import sys as _sys
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        if scripts_dir not in _sys.path:
+            _sys.path.insert(0, scripts_dir)
+        from parse_line_export import load_config, parse_lines, write_outputs
+        from extract_transcript import extract
+
+        config = load_config()
+        source_meta = extract(filepath)
+        lines = source_meta.pop("lines")
+        result = parse_lines(lines, source_meta, config)
+
+        # Apply feedback overrides: accepted reclassifications survive re-parse
+        reclass_rows = conn.execute(
+            """SELECT target_id, corrected_value FROM feedback_signals
+               WHERE user_id = ? AND signal_type = 'reclassify_message'""",
+            (user["id"],),
+        ).fetchall()
+        overrides = {r["target_id"]: r["corrected_value"] for r in reclass_rows if r["target_id"]}
+        user_overrides_applied = 0
+        if overrides:
+            for sess in result["sessions"]:
+                for msg in sess.get("messages", []):
+                    mid = msg.get("message_id", "")
+                    if mid in overrides and msg.get("message_type") != overrides[mid]:
+                        msg["message_type"] = overrides[mid]
+                        if "user-corrected" not in msg.get("tags", []):
+                            msg.setdefault("tags", []).append("user-corrected")
+                        user_overrides_applied += 1
+                # Recompute session stats after overrides
+                messages = sess.get("messages", [])
+                sess["lesson_content_count"] = sum(1 for m in messages if m["message_type"] == "lesson-content")
+                sess["message_count"] = len(messages)
+            # Recompute global stats
+            all_msgs = [m for s in result["sessions"] for m in s.get("messages", [])]
+            result["stats"]["lesson_content_messages"] = sum(1 for m in all_msgs if m["message_type"] == "lesson-content")
+
+        # Archive old sessions.json
+        sessions_path = os.path.join(canonical_run["output_dir"], "sessions.json")
+        if os.path.isfile(sessions_path):
+            archive_dir = os.path.join(canonical_run["output_dir"], "_previous")
+            os.makedirs(archive_dir, exist_ok=True)
+            archive_name = f"sessions_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+            import shutil
+            shutil.copy2(sessions_path, os.path.join(archive_dir, archive_name))
+
+        # Write new sessions.json (and other artifacts)
+        write_outputs(result, source_meta, config, canonical_run["run_id"], canonical_run["output_dir"])
+
+        # Update session metadata in DB
+        new_sessions_by_id = {s["session_id"]: s for s in result["sessions"] if s["message_count"] > 0}
+        existing_sessions = conn.execute(
+            "SELECT id, session_id FROM sessions WHERE run_id = ? AND user_id = ?",
+            (canonical_run["run_id"], user["id"]),
+        ).fetchall()
+        existing_ids = {r["session_id"] for r in existing_sessions}
+
+        updated = 0
+        inserted = 0
+        for sid, sess in new_sessions_by_id.items():
+            if sid in existing_ids:
+                conn.execute(
+                    """UPDATE sessions SET
+                          message_count = ?, lesson_content_count = ?,
+                          teacher_message_count = ?, student_message_count = ?,
+                          start_time = ?, end_time = ?, boundary_confidence = ?
+                       WHERE run_id = ? AND session_id = ? AND user_id = ?""",
+                    (sess["message_count"], sess["lesson_content_count"],
+                     sess.get("teacher_message_count", 0), sess.get("student_message_count", 0),
+                     sess["start_time"], sess["end_time"], sess["boundary_confidence"],
+                     canonical_run["run_id"], sid, user["id"]),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO sessions
+                       (run_id, user_id, session_id, date, start_time, end_time,
+                        message_count, lesson_content_count, teacher_message_count, student_message_count,
+                        boundary_confidence, topics_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (canonical_run["run_id"], user["id"], sid, sess["date"],
+                     sess["start_time"], sess["end_time"],
+                     sess["message_count"], sess["lesson_content_count"],
+                     sess.get("teacher_message_count", 0), sess.get("student_message_count", 0),
+                     sess["boundary_confidence"], json.dumps([])),
+                )
+                inserted += 1
+
+        # Update run stats
+        stats = result["stats"]
+        conn.execute(
+            """UPDATE parse_runs SET
+                  session_count = ?, message_count = ?, lesson_content_count = ?
+               WHERE run_id = ?""",
+            (stats["total_sessions"], stats["total_messages"],
+             stats["lesson_content_messages"], canonical_run["run_id"]),
+        )
+        # Auto-archive sessions with no teacher messages (not lesson-related)
+        auto_archived = conn.execute(
+            """UPDATE sessions SET is_archived = 1
+               WHERE run_id = ? AND user_id = ? AND teacher_message_count = 0
+                 AND is_archived = 0""",
+            (canonical_run["run_id"], user["id"]),
+        ).rowcount
+        # Unarchive sessions that now have teacher messages (parser improved)
+        auto_unarchived = conn.execute(
+            """UPDATE sessions SET is_archived = 0
+               WHERE run_id = ? AND user_id = ? AND teacher_message_count > 0
+                 AND is_archived = 1""",
+            (canonical_run["run_id"], user["id"]),
+        ).rowcount
+
+        conn.commit()
+
+        _track_event(conn, user["id"], "reparse", {
+            "run_id": canonical_run["run_id"],
+            "updated": updated,
+            "inserted": inserted,
+            "total_sessions": stats["total_sessions"],
+            "auto_archived": auto_archived,
+            "auto_unarchived": auto_unarchived,
+            "user_overrides_applied": user_overrides_applied,
+        })
+
+        return jsonify({
+            "run_id": canonical_run["run_id"],
+            "total_sessions": stats["total_sessions"],
+            "updated_sessions": updated,
+            "new_sessions": inserted,
+            "total_messages": stats["total_messages"],
+            "lesson_content_count": stats["lesson_content_messages"],
+            "auto_archived": auto_archived,
+            "auto_unarchived": auto_unarchived,
+            "user_overrides_applied": user_overrides_applied,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/archive", methods=["POST"])
+@jwt_required()
+def toggle_archive(session_id):
+    """Archive or unarchive a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No parse run"}), 404
+
+        row = conn.execute(
+            "SELECT is_archived FROM sessions WHERE run_id = ? AND session_id = ? AND user_id = ?",
+            (run["run_id"], session_id, user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Session not found"}), 404
+
+        new_val = 0 if row["is_archived"] else 1
+        conn.execute(
+            "UPDATE sessions SET is_archived = ? WHERE run_id = ? AND session_id = ? AND user_id = ?",
+            (new_val, run["run_id"], session_id, user["id"]),
+        )
+        # Record feedback signal for manual archive/unarchive
+        signal_type = "archive" if new_val else "unarchive"
+        conn.execute(
+            """INSERT INTO feedback_signals
+               (user_id, session_id, signal_type, original_value, corrected_value)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user["id"], session_id, signal_type,
+             "active" if new_val else "archived",
+             "archived" if new_val else "active"),
+        )
+        conn.commit()
+        return jsonify({"session_id": session_id, "is_archived": bool(new_val)})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# AI Review
+# ---------------------------------------------------------------------------
+
+@app.route("/api/sessions/<session_id>/review", methods=["POST"])
+@jwt_required()
+def trigger_review(session_id):
+    """Trigger an AI review of a session's parse or summary."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No parse run found"}), 404
+
+        body = request.get_json(silent=True) or {}
+        review_type = body.get("review_type", "parse")
+        if review_type not in ("parse", "summary"):
+            return jsonify({"error": "review_type must be 'parse' or 'summary'"}), 400
+
+        # Load provider config
+        _, _, use_provider, use_model, temperature = _load_generator_config(
+            body.get("provider"), body.get("model"),
+        )
+        credential_error = _validate_provider_credentials(use_provider)
+        if credential_error:
+            return jsonify({"error": credential_error}), 400
+
+        # Load session data
+        sessions_by_id = _load_sessions_payload(run)
+        session_data = sessions_by_id.get(session_id)
+        if not session_data:
+            return jsonify({"error": "Session not found in sessions.json"}), 404
+
+        # Import review functions
+        import sys as _sys
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        if scripts_dir not in _sys.path:
+            _sys.path.insert(0, scripts_dir)
+        from ai_review import review_parse, review_summary
+
+        if review_type == "parse":
+            # Load feedback signals for this session
+            feedback_rows = conn.execute(
+                "SELECT * FROM feedback_signals WHERE session_id = ? ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
+            feedback = [dict(r) for r in feedback_rows]
+
+            findings = review_parse(
+                session_data,
+                provider=use_provider,
+                model=use_model,
+                temperature=temperature,
+                feedback_signals=feedback,
+            )
+        else:
+            # Load existing summary for this session
+            summary_row = conn.execute(
+                """SELECT lesson_data_json FROM lesson_summaries
+                   WHERE session_id = ? AND user_id = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (session_id, user["id"]),
+            ).fetchone()
+            if not summary_row:
+                return jsonify({"error": "No summary found for this session. Generate one first."}), 404
+
+            lesson_data = json.loads(summary_row["lesson_data_json"])
+            findings = review_summary(
+                lesson_data,
+                session_data,
+                provider=use_provider,
+                model=use_model,
+                temperature=temperature,
+            )
+
+        # Store review
+        findings_json = json.dumps(findings, ensure_ascii=False)
+        conn.execute(
+            """INSERT INTO ai_reviews
+               (user_id, session_id, review_type, provider, model, findings_json, findings_count, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+            (user["id"], session_id, review_type, use_provider, use_model,
+             findings_json, len(findings)),
+        )
+        review_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+        return jsonify({
+            "id": review_id,
+            "session_id": session_id,
+            "review_type": review_type,
+            "provider": use_provider,
+            "model": use_model,
+            "findings": findings,
+            "findings_count": len(findings),
+            "status": "pending",
+        })
+    except FileNotFoundError:
+        return jsonify({"error": "Sessions file not found"}), 404
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/reviews", methods=["GET"])
+@jwt_required()
+def list_reviews(session_id):
+    """List AI reviews for a session."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        rows = conn.execute(
+            """SELECT id, session_id, review_type, provider, model,
+                      findings_json, findings_count, accepted_count, dismissed_count,
+                      status, created_at
+               FROM ai_reviews
+               WHERE session_id = ? AND user_id = ?
+               ORDER BY created_at DESC""",
+            (session_id, user["id"]),
+        ).fetchall()
+
+        reviews = []
+        for r in rows:
+            findings = json.loads(r["findings_json"])
+            reviews.append({
+                "id": r["id"],
+                "session_id": r["session_id"],
+                "review_type": r["review_type"],
+                "provider": r["provider"],
+                "model": r["model"],
+                "findings": findings,
+                "findings_count": r["findings_count"],
+                "accepted_count": r["accepted_count"],
+                "dismissed_count": r["dismissed_count"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+            })
+
+        return jsonify(reviews)
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/reviews/<int:review_id>/findings/<int:finding_idx>/accept", methods=["POST"])
+@jwt_required()
+def accept_finding(session_id, review_id, finding_idx):
+    """Accept a review finding — applies the suggested change."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        row = conn.execute(
+            "SELECT * FROM ai_reviews WHERE id = ? AND session_id = ? AND user_id = ?",
+            (review_id, session_id, user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Review not found"}), 404
+
+        findings = json.loads(row["findings_json"])
+        if finding_idx < 0 or finding_idx >= len(findings):
+            return jsonify({"error": "Finding index out of range"}), 400
+
+        finding = findings[finding_idx]
+        if finding.get("status") != "pending":
+            return jsonify({"error": f"Finding already {finding.get('status')}"}), 400
+
+        # Mark finding as accepted
+        finding["status"] = "accepted"
+
+        review_type = row["review_type"]
+        if review_type == "parse" and finding.get("suggested_type"):
+            # Update message classification in sessions.json
+            run = _load_latest_completed_run(conn, user["id"])
+            if run:
+                sessions_path = os.path.join(run["output_dir"], "sessions.json")
+                if os.path.isfile(sessions_path):
+                    with open(sessions_path, "r", encoding="utf-8") as f:
+                        sessions_data = json.load(f)
+
+                    msg_id = finding["message_id"]
+                    updated = False
+                    for sess in sessions_data.get("sessions", []):
+                        if sess["session_id"] != session_id:
+                            continue
+                        for msg in sess.get("messages", []):
+                            if msg.get("message_id") == msg_id:
+                                msg["message_type"] = finding["suggested_type"]
+                                if finding.get("suggested_role"):
+                                    msg["speaker_role"] = finding["suggested_role"]
+                                updated = True
+                                break
+                        break
+
+                    if updated:
+                        with open(sessions_path, "w", encoding="utf-8") as f:
+                            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
+
+            # Record feedback signal
+            conn.execute(
+                """INSERT INTO feedback_signals
+                   (user_id, session_id, signal_type, target_id, original_value, corrected_value)
+                   VALUES (?, ?, 'reclassify_message', ?, ?, ?)""",
+                (user["id"], session_id, finding.get("message_id"),
+                 finding.get("current_type"), finding.get("suggested_type")),
+            )
+
+        # Record to feedback memory for retrieval (Phase 4)
+        _record_feedback_memory(
+            conn, user["id"], session_id, "accept_correction",
+            target_type=review_type,
+            target_id=finding.get("message_id"),
+            original=finding.get("current_type"),
+            corrected=finding.get("suggested_type"),
+            detail=finding.get("reason"),
+        )
+
+        # Update review record
+        new_accepted = row["accepted_count"] + 1
+        new_status = "completed" if (new_accepted + row["dismissed_count"]) >= row["findings_count"] else "reviewed"
+        conn.execute(
+            """UPDATE ai_reviews SET findings_json = ?, accepted_count = ?, status = ?
+               WHERE id = ?""",
+            (json.dumps(findings, ensure_ascii=False), new_accepted, new_status, review_id),
+        )
+        conn.commit()
+
+        return jsonify({"finding": finding, "review_status": new_status})
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/reviews/<int:review_id>/findings/<int:finding_idx>/dismiss", methods=["POST"])
+@jwt_required()
+def dismiss_finding(session_id, review_id, finding_idx):
+    """Dismiss a review finding — marks it as incorrect."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        row = conn.execute(
+            "SELECT * FROM ai_reviews WHERE id = ? AND session_id = ? AND user_id = ?",
+            (review_id, session_id, user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Review not found"}), 404
+
+        findings = json.loads(row["findings_json"])
+        if finding_idx < 0 or finding_idx >= len(findings):
+            return jsonify({"error": "Finding index out of range"}), 400
+
+        finding = findings[finding_idx]
+        if finding.get("status") != "pending":
+            return jsonify({"error": f"Finding already {finding.get('status')}"}), 400
+
+        finding["status"] = "dismissed"
+
+        new_dismissed = row["dismissed_count"] + 1
+        new_status = "completed" if (row["accepted_count"] + new_dismissed) >= row["findings_count"] else "reviewed"
+        conn.execute(
+            """UPDATE ai_reviews SET findings_json = ?, dismissed_count = ?, status = ?
+               WHERE id = ?""",
+            (json.dumps(findings, ensure_ascii=False), new_dismissed, new_status, review_id),
+        )
+        conn.commit()
+
+        return jsonify({"finding": finding, "review_status": new_status})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Analytics
 # ---------------------------------------------------------------------------
 def _track_event(conn, user_id, event_type, event_data):
@@ -2766,7 +4501,7 @@ def list_users():
             return jsonify({"error": "Admin required"}), 403
 
         rows = conn.execute(
-            "SELECT id, email, display_name, is_admin, status, last_login_at, created_at FROM users ORDER BY created_at DESC"
+            "SELECT id, email, display_name, is_admin, status, role, last_login_at, created_at FROM users ORDER BY created_at DESC"
         ).fetchall()
         return jsonify([{
             "id": r["id"],
@@ -2774,6 +4509,7 @@ def list_users():
             "display_name": r["display_name"],
             "is_admin": bool(r["is_admin"]),
             "status": r["status"] or "active",
+            "role": r["role"] or "student",
             "last_login_at": r["last_login_at"],
             "created_at": r["created_at"],
         } for r in rows])
@@ -2827,6 +4563,34 @@ def reactivate_user(user_id):
         _log_security_event(conn, "user_reactivated", user_id=user_id, actor_id=admin["id"])
         conn.commit()
         return jsonify({"message": "User reactivated"}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/users/<int:user_id>/role", methods=["POST"])
+@jwt_required()
+def set_user_role(user_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        admin = _load_user(conn, email)
+        if not admin or not admin["is_admin"]:
+            return jsonify({"error": "Admin required"}), 403
+
+        data = request.get_json() or {}
+        role = data.get("role", "").strip().lower()
+        if role not in ("student", "teacher"):
+            return jsonify({"error": "Role must be 'student' or 'teacher'"}), 400
+
+        target = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+        _log_security_event(conn, "user_role_changed", user_id=user_id, actor_id=admin["id"],
+                            details=f"role={role}")
+        conn.commit()
+        return jsonify({"message": f"Role set to {role}"}), 200
     finally:
         conn.close()
 

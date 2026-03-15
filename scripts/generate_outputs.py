@@ -167,13 +167,21 @@ PROVIDERS = {
 # Transcript builder — assembles the user prompt for the LLM
 # ---------------------------------------------------------------------------
 
-def build_transcript_text(session: dict) -> str:
-    """Build a readable transcript block from a session for the LLM."""
+def build_transcript_text(session: dict, reclassifications: dict | None = None) -> str:
+    """Build a readable transcript block from a session for the LLM.
+
+    Args:
+        session: Session dict with messages array.
+        reclassifications: Optional dict mapping message_id -> corrected message_type.
+            When provided, reclassified messages are annotated in the transcript.
+    """
     lines = []
     lines.append(f"## Lesson: {session['date']} ({session['start_time']}–{session['end_time']})")
     lines.append(f"Session ID: {session['session_id']}")
     lines.append(f"Messages: {session['message_count']} total, {session['lesson_content_count']} lesson-content")
     lines.append("")
+
+    reclass = reclassifications or {}
 
     for msg in session.get("messages", []):
         role = msg.get("speaker_role", "unknown")
@@ -186,8 +194,60 @@ def build_transcript_text(session: dict) -> str:
             continue  # skip per prompt rules
 
         label = "Teacher" if role == "teacher" else ("Student" if role == "student" else "?")
-        lines.append(f"[{mid}] {time_str} {label}: {raw}")
+        line = f"[{mid}] {time_str} {label}: {raw}"
 
+        # Annotate reclassified messages so the LLM knows to include/exclude them
+        if mid in reclass and reclass[mid] != mtype:
+            line += f" [RECLASSIFIED: was {mtype} → {reclass[mid]}]"
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def build_correction_context(corrections: list) -> str:
+    """Format accepted corrections as a context block for the LLM.
+
+    Args:
+        corrections: List of correction dicts, each with keys like:
+            - type: 'reclassify_message' | 'translation' | 'pinyin' | 'annotation'
+            - message_id / item_id: target identifier
+            - original / corrected: original and corrected values
+            - detail: extra context
+    """
+    if not corrections:
+        return ""
+
+    lines = [
+        "## Ground Truth Corrections",
+        "The following corrections have been verified by the user. Treat them as authoritative:",
+        "",
+    ]
+
+    for c in corrections:
+        ctype = c.get("type", "")
+        if ctype == "reclassify_message":
+            lines.append(
+                f"- Message {c.get('message_id', '?')}: reclassified from "
+                f"'{c.get('original', '?')}' to '{c.get('corrected', '?')}'"
+            )
+        elif ctype == "translation":
+            lines.append(
+                f"- {c.get('item_id', 'Item')}: English should be "
+                f"\"{c.get('corrected', '')}\" not \"{c.get('original', '')}\""
+            )
+        elif ctype == "pinyin":
+            lines.append(
+                f"- {c.get('item_id', 'Item')}: pinyin should be "
+                f"\"{c.get('corrected', '')}\" not \"{c.get('original', '')}\""
+            )
+        elif ctype == "annotation":
+            lines.append(f"- {c.get('detail', c.get('message_id', 'Note'))}")
+        else:
+            detail = c.get("detail") or c.get("corrected") or str(c)
+            lines.append(f"- {detail}")
+
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -376,8 +436,16 @@ def generate_csv(lesson: dict, output_path: str):
 # ---------------------------------------------------------------------------
 
 def process_session(session: dict, config: dict, provider: str, model: str,
-                    temperature: float, run_id: str, output_base: str) -> dict:
-    """Run the full generation pipeline for one session."""
+                    temperature: float, run_id: str, output_base: str,
+                    corrections: list | None = None,
+                    retrieval_context: str | None = None) -> dict:
+    """Run the full generation pipeline for one session.
+
+    Args:
+        corrections: Optional list of verified corrections to inject as context.
+            Each is a dict with keys: type, message_id/item_id, original, corrected, detail.
+        retrieval_context: Optional text block of prior knowledge from retrieval index.
+    """
     session_id = session["session_id"]
     date = session["date"]
     output_dir = os.path.join(output_base, session_id)
@@ -388,10 +456,27 @@ def process_session(session: dict, config: dict, provider: str, model: str,
         print(f"Error: unknown provider '{provider}'. Supported: {list(PROVIDERS.keys())}", file=sys.stderr)
         sys.exit(1)
 
+    # Build reclassification lookup for transcript annotation
+    reclassifications = {}
+    if corrections:
+        for c in corrections:
+            if c.get("type") == "reclassify_message" and c.get("message_id"):
+                reclassifications[c["message_id"]] = c.get("corrected", "")
+
     # --- Pass 1: Master summarizer ---
     print(f"\n[{session_id}] Pass 1: Generating lesson summary...")
     master_prompt = load_prompt("master-summarizer")
-    transcript_text = build_transcript_text(session)
+    transcript_text = build_transcript_text(session, reclassifications=reclassifications)
+
+    # Prepend retrieval context from prior sessions (Phase 4)
+    if retrieval_context:
+        transcript_text = retrieval_context + "\n" + transcript_text
+
+    # Prepend correction context if available
+    correction_context = build_correction_context(corrections) if corrections else ""
+    if correction_context:
+        transcript_text = correction_context + "\n" + transcript_text
+
     raw_summary = call_llm(master_prompt, transcript_text, model, temperature)
 
     # Parse JSON response
