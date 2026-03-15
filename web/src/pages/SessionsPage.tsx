@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { apiJson } from '../api';
+import { apiJson, apiFetch } from '../api';
 import type { Session, SharedLink } from '../types';
 
-type SortMode = 'date' | 'content';
+type ViewFilter = 'teacher' | 'me' | 'all';
 
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sortMode, setSortMode] = useState<SortMode>('date');
+  const [viewFilter, setViewFilter] = useState<ViewFilter>('teacher');
+  const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
 
   useEffect(() => {
@@ -16,6 +17,19 @@ export default function SessionsPage() {
       .then(setSessions)
       .finally(() => setLoading(false));
   }, []);
+
+  const toggleArchive = async (sessionId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}/archive`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(prev => prev.map(s =>
+          s.session_id === sessionId ? { ...s, is_archived: data.is_archived } : s
+        ));
+      }
+    } catch { /* ignore */ }
+  };
 
   if (loading) return <div className="text-gray-400">Loading sessions...</div>;
   if (sessions.length === 0) {
@@ -28,33 +42,62 @@ export default function SessionsPage() {
     );
   }
 
-  // Filter
-  const filtered = sessions.filter(s => {
+  // Separate active and archived
+  const activeSessions = sessions.filter(s => !s.is_archived);
+  const archivedSessions = sessions.filter(s => s.is_archived);
+
+  // Apply view filter (only on active sessions)
+  const viewFiltered = activeSessions.filter(s => {
+    if (viewFilter === 'teacher') return s.teacher_message_count > 0;
+    if (viewFilter === 'me') return s.student_message_count > 0;
+    return true;
+  });
+
+  // Apply text search
+  const searchFiltered = viewFiltered.filter(s => {
     if (!filter) return true;
     const q = filter.toLowerCase();
     return s.date.includes(q) || s.session_id.toLowerCase().includes(q) ||
       s.topics.some(t => t.toLowerCase().includes(q));
   });
 
-  // Sort
-  const sorted = [...filtered].sort((a, b) => {
-    if (sortMode === 'content') return b.lesson_content_count - a.lesson_content_count;
-    return b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time);
+  // Also filter archived by text search
+  const archivedFiltered = archivedSessions.filter(s => {
+    if (!filter) return true;
+    const q = filter.toLowerCase();
+    return s.date.includes(q) || s.session_id.toLowerCase().includes(q) ||
+      s.topics.some(t => t.toLowerCase().includes(q));
   });
 
-  // Group by month for date view
-  const groupedByMonth = new Map<string, Session[]>();
-  for (const s of sorted) {
-    const month = s.date.slice(0, 7); // YYYY-MM
-    if (!groupedByMonth.has(month)) groupedByMonth.set(month, []);
-    groupedByMonth.get(month)!.push(s);
-  }
+  // Sort by date descending
+  const sorted = [...searchFiltered].sort((a, b) =>
+    b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time)
+  );
+  const archivedSorted = [...archivedFiltered].sort((a, b) =>
+    b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time)
+  );
+
+  // Group by month
+  const groupByMonth = (list: Session[]) => {
+    const map = new Map<string, Session[]>();
+    for (const s of list) {
+      const month = s.date.slice(0, 7);
+      if (!map.has(month)) map.set(month, []);
+      map.get(month)!.push(s);
+    }
+    return map;
+  };
+
+  const groupedByMonth = groupByMonth(sorted);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Sessions</h1>
-        <span className="text-sm text-gray-400">{filtered.length} of {sessions.length}</span>
+        <span className="text-sm text-gray-400">
+          {searchFiltered.length} of {activeSessions.length}
+          {archivedSessions.length > 0 && ` · ${archivedSessions.length} archived`}
+        </span>
       </div>
 
       {/* Controls */}
@@ -67,48 +110,76 @@ export default function SessionsPage() {
           className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
         />
         <div className="flex bg-gray-800 rounded-lg border border-gray-700 overflow-hidden w-full sm:w-auto">
-          <button
-            onClick={() => setSortMode('date')}
-            className={`flex-1 px-3 py-2 text-sm transition-colors ${sortMode === 'date' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
-          >
-            By Date
-          </button>
-          <button
-            onClick={() => setSortMode('content')}
-            className={`flex-1 px-3 py-2 text-sm transition-colors ${sortMode === 'content' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
-          >
-            By Content
-          </button>
+          {([['teacher', 'Teacher'], ['me', 'Me'], ['all', 'All']] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setViewFilter(key)}
+              className={`flex-1 px-4 py-2 text-sm transition-colors ${
+                viewFilter === key ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* List */}
-      {sortMode === 'date' ? (
-        // Grouped by month
-        Array.from(groupedByMonth.entries()).map(([month, items]) => (
-          <div key={month}>
-            <h3 className="text-sm font-medium text-gray-500 mb-2 sticky top-0 bg-gray-950 py-1">{month}</h3>
-            <div className="space-y-2">
-              {items.map(s => <SessionCard key={s.session_id} session={s} />)}
-            </div>
+      {/* Active sessions grouped by month */}
+      {Array.from(groupedByMonth.entries()).map(([month, items]) => (
+        <div key={month}>
+          <h3 className="text-sm font-medium text-gray-500 mb-2 sticky top-0 bg-gray-950 py-1">{month}</h3>
+          <div className="space-y-2">
+            {items.map(s => (
+              <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
+            ))}
           </div>
-        ))
-      ) : (
-        <div className="space-y-2">
-          {sorted.map(s => <SessionCard key={s.session_id} session={s} />)}
+        </div>
+      ))}
+
+      {sorted.length === 0 && (
+        <p className="text-gray-500 text-sm py-4 text-center">
+          No sessions match the current filter.
+        </p>
+      )}
+
+      {/* Archived section */}
+      {archivedSessions.length > 0 && (
+        <div className="border-t border-gray-800 pt-4 mt-6">
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            <span className={`transition-transform ${showArchived ? 'rotate-90' : ''}`}>▶</span>
+            Archived ({archivedFiltered.length})
+          </button>
+
+          {showArchived && (
+            <div className="space-y-2 mt-3">
+              {archivedSorted.map(s => (
+                <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
+              ))}
+              {archivedFiltered.length === 0 && (
+                <p className="text-gray-600 text-sm">No archived sessions match your search.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function SessionCard({ session: s }: { session: Session }) {
+function SessionCard({ session: s, onArchive }: { session: Session; onArchive: (id: string, e: React.MouseEvent) => void }) {
   const navigate = useNavigate();
 
   return (
     <div
       onClick={() => navigate(`/sessions/${s.session_id}`)}
-      className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-indigo-600 transition-colors cursor-pointer"
+      className={`bg-gray-900 border rounded-lg p-4 transition-colors cursor-pointer ${
+        s.is_archived
+          ? 'border-gray-800/50 opacity-70 hover:opacity-100 hover:border-gray-600'
+          : 'border-gray-800 hover:border-indigo-600'
+      }`}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
         <div className="min-w-0">
@@ -124,17 +195,50 @@ function SessionCard({ session: s }: { session: Session }) {
             </div>
           )}
         </div>
-        <div className="text-sm sm:text-right">
-          <div>
-            <span className="text-indigo-400 font-medium">{s.lesson_content_count}</span>
-            <span className="text-gray-500"> lesson</span>
+        <div className="flex items-start gap-3">
+          <div className="text-sm sm:text-right">
+            <div className="flex gap-3 sm:justify-end">
+              {s.teacher_message_count > 0 && (
+                <span>
+                  <span className="text-pink-400 font-medium">{s.teacher_message_count}</span>
+                  <span className="text-gray-500"> teacher</span>
+                </span>
+              )}
+              {s.student_message_count > 0 && (
+                <span>
+                  <span className="text-cyan-400 font-medium">{s.student_message_count}</span>
+                  <span className="text-gray-500"> me</span>
+                </span>
+              )}
+            </div>
+            <div className="text-gray-500">{s.message_count} total</div>
+            {s.has_summary && (
+              <Link
+                to={`/sessions/${s.session_id}/summary`}
+                onClick={e => e.stopPropagation()}
+                className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs hover:bg-green-800 transition-colors"
+              >
+                Summary
+              </Link>
+            )}
+            {s.needs_summary && (
+              <Link
+                to={`/sessions/${s.session_id}/summary`}
+                onClick={e => e.stopPropagation()}
+                className="inline-flex items-center gap-1 mt-1 bg-amber-900/60 text-amber-400 px-2 py-0.5 rounded text-xs hover:bg-amber-900 transition-colors"
+                title="No summary yet — click to generate"
+              >
+                <span className="opacity-70">&#x26A0;</span> Generate
+              </Link>
+            )}
           </div>
-          <div className="text-gray-500">{s.message_count} total</div>
-          {s.has_summary && (
-            <span className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">
-              ✓ Summary
-            </span>
-          )}
+          <button
+            onClick={(e) => onArchive(s.session_id, e)}
+            className="shrink-0 p-1 text-gray-600 hover:text-gray-300 transition-colors"
+            title={s.is_archived ? 'Unarchive' : 'Archive'}
+          >
+            {s.is_archived ? '↩' : '📦'}
+          </button>
         </div>
       </div>
 

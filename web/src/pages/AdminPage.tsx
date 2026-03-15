@@ -176,6 +176,25 @@ function UsersPanel() {
     }
   };
 
+  const handleRoleToggle = async (userId: number, currentRole: string) => {
+    setActionError('');
+    const newRole = currentRole === 'teacher' ? 'student' : 'teacher';
+    try {
+      const res = await apiFetch(`/api/admin/users/${userId}/role`, {
+        method: 'POST',
+        body: JSON.stringify({ role: newRole }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setActionError(data.error || 'Failed to change role');
+        return;
+      }
+      loadUsers();
+    } catch {
+      setActionError('Failed to change role');
+    }
+  };
+
   const statusBadge = (status: string) => {
     const colors: Record<string, string> = {
       active: 'bg-green-900/50 text-green-400',
@@ -188,6 +207,13 @@ function UsersPanel() {
         {status}
       </span>
     );
+  };
+
+  const roleBadge = (role: string) => {
+    if (role === 'teacher') {
+      return <span className="text-xs px-2 py-0.5 rounded bg-pink-900/50 text-pink-400">teacher</span>;
+    }
+    return <span className="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-400">student</span>;
   };
 
   return (
@@ -206,30 +232,38 @@ function UsersPanel() {
             <div key={u.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-white font-medium">{u.email}</span>
                     {statusBadge(u.status)}
+                    {roleBadge(u.role)}
                     {u.is_admin && <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/50 text-indigo-400">admin</span>}
                   </div>
                   {u.display_name && <div className="text-gray-400 text-sm">{u.display_name}</div>}
                   <div className="text-gray-600 text-xs mt-1">
                     Joined {new Date(u.created_at + 'Z').toLocaleDateString()}
-                    {u.last_login_at && <> · Last login {new Date(u.last_login_at + 'Z').toLocaleDateString()}</>}
+                    {u.last_login_at && <> &middot; Last login {new Date(u.last_login_at + 'Z').toLocaleDateString()}</>}
                   </div>
                 </div>
                 {u.email !== currentUser?.email && (
-                  <div className="shrink-0">
+                  <div className="flex gap-2 shrink-0 flex-wrap">
+                    <button
+                      onClick={() => handleRoleToggle(u.id, u.role)}
+                      className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white text-xs rounded transition-colors"
+                      title={`Switch to ${u.role === 'teacher' ? 'student' : 'teacher'}`}
+                    >
+                      {u.role === 'teacher' ? 'Set Student' : 'Set Teacher'}
+                    </button>
                     {u.status === 'active' ? (
                       <button
                         onClick={() => handleAction(u.id, 'suspend')}
-                        className="px-3 py-1 bg-yellow-700 hover:bg-yellow-600 text-white text-sm rounded transition-colors"
+                        className="px-3 py-1 bg-yellow-700 hover:bg-yellow-600 text-white text-xs rounded transition-colors"
                       >
                         Suspend
                       </button>
                     ) : u.status === 'suspended' ? (
                       <button
                         onClick={() => handleAction(u.id, 'reactivate')}
-                        className="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-sm rounded transition-colors"
+                        className="px-3 py-1 bg-green-700 hover:bg-green-600 text-white text-xs rounded transition-colors"
                       >
                         Reactivate
                       </button>

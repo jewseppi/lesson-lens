@@ -19,13 +19,25 @@ import yaml
 from datetime import timezone
 
 from extract_transcript import extract
+from pinyin_dict import contains_informal_pinyin
 
 # ---------------------------------------------------------------------------
 # Regex patterns (from Parsing Spec v1)
 # ---------------------------------------------------------------------------
+# Mobile export:  "Mon, 2024-09-24"
 RE_DATE_HEADER = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s(\d{4}-\d{2}-\d{2})$")
+# Desktop export: "2026.03.08 Sunday"
+RE_DATE_HEADER_DESKTOP = re.compile(
+    r"^(\d{4})\.(\d{2})\.(\d{2})\s+"
+    r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$"
+)
+# Mobile: tab-separated "01:05\tSpeaker\tMessage"
 RE_MESSAGE_START = re.compile(r"^(\d{2}:\d{2})\t([^\t]+)\t(.*)$")
 RE_BLANK = re.compile(r"^\s*$")
+# Desktop: "Message unsent." / "unsent a message." (with or without time prefix)
+RE_UNSENT = re.compile(
+    r"^(?:\d{2}:\d{2}\s+)?(?:Message unsent\.|unsent a message\.)$", re.IGNORECASE
+)
 
 # Language / content detection
 RE_CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
@@ -37,7 +49,11 @@ RE_BILINGUAL_PAIR = re.compile(
     r"([\u4e00-\u9fff\u3400-\u4dbf]+)\s*[/\-]\s*([a-zA-Z][\w\s]*)",
 )
 
-MEDIA_PLACEHOLDERS = {"[Photo]", "[File]", "[Sticker]", "[Contact]"}
+# Media placeholders — mobile uses brackets, desktop uses plain words
+MEDIA_PLACEHOLDERS = {
+    "[Photo]", "[File]", "[Sticker]", "[Contact]",
+    "Photos", "Photo", "Sticker", "File",
+}
 CALL_SYSTEM_PHRASE = "called you. You can make and receive calls"
 
 # ---------------------------------------------------------------------------
@@ -68,6 +84,10 @@ def classify_message(text: str, config: dict) -> tuple[str, str, list[str]]:
     if CALL_SYSTEM_PHRASE in text:
         return "call-system", "en", ["system"]
 
+    # Unsent message notification (desktop export includes these as speaker messages)
+    if RE_UNSENT.match(text_stripped):
+        return "logistics", "en", ["system-unsent"]
+
     # Detect language features
     has_cjk = bool(RE_CJK.search(text))
     has_pinyin_num = bool(RE_PINYIN_NUMERIC.search(text))
@@ -97,6 +117,13 @@ def classify_message(text: str, config: dict) -> tuple[str, str, list[str]]:
             "zh" if has_cjk else "pinyin"
         )
         return "lesson-content", lang, tags
+
+    # Informal pinyin detection (e.g. "kan le", "mei you", "bu hao")
+    # Uses a dictionary of ~410 valid Mandarin pinyin syllables;
+    # triggers when ≥2 syllables are found to avoid false positives.
+    if contains_informal_pinyin(text_stripped):
+        tags.append("pinyin-informal")
+        return "lesson-content", "pinyin", tags
 
     # Logistics detection (English-only, scheduling patterns)
     logistics_patterns = [
@@ -139,6 +166,23 @@ def resolve_speaker_role(speaker_raw: str, config: dict) -> str:
     return "unknown"
 
 
+def _build_desktop_message_re(config: dict):
+    """Build a regex for desktop LINE exports using known speaker names.
+
+    Desktop format: ``HH:MM SpeakerName MessageText``
+    Since there are no tabs, we anchor on the known speaker aliases to
+    separate the speaker from the message body.
+    """
+    teachers = config.get("speakers", {}).get("teacher_aliases", [])
+    students = config.get("speakers", {}).get("student_aliases", [])
+    names = teachers + students
+    if not names:
+        return None
+    escaped = [re.escape(n) for n in sorted(names, key=len, reverse=True)]
+    pattern = r"^(\d{2}:\d{2})\s(" + "|".join(escaped) + r")\s(.*)$"
+    return re.compile(pattern)
+
+
 # ---------------------------------------------------------------------------
 # State-machine parser
 # ---------------------------------------------------------------------------
@@ -155,6 +199,9 @@ def parse_lines(lines: list[str], source_meta: dict, config: dict) -> dict:
     current_date = None
     current_msg = None
     msg_counter = 0
+
+    # Build desktop message regex from known speaker aliases
+    re_desktop_msg = _build_desktop_message_re(config)
 
     def finalize_message():
         nonlocal current_msg
@@ -173,34 +220,57 @@ def parse_lines(lines: list[str], source_meta: dict, config: dict) -> dict:
         messages.append(current_msg)
         current_msg = None
 
+    def _try_match_date(line):
+        """Try mobile then desktop date header formats."""
+        m = RE_DATE_HEADER.match(line)
+        if m:
+            return m.group(2)  # already YYYY-MM-DD
+        m = RE_DATE_HEADER_DESKTOP.match(line)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return None
+
+    def _try_match_message(line):
+        """Try mobile (tab-sep) then desktop (space-sep) message formats."""
+        m = RE_MESSAGE_START.match(line)
+        if m:
+            return m.group(1), m.group(2), m.group(3)
+        if re_desktop_msg:
+            m = re_desktop_msg.match(line)
+            if m:
+                return m.group(1), m.group(2), m.group(3)
+        return None
+
     for line_num_0, line in enumerate(lines):
         line_num = line_num_0 + 1  # 1-indexed
 
-        # Check date header
-        m_date = RE_DATE_HEADER.match(line)
-        if m_date:
+        # Check date header (mobile or desktop)
+        date_str = _try_match_date(line)
+        if date_str:
             finalize_message()
-            current_date = m_date.group(2)
-            if state == "PREAMBLE":
-                state = "IN_DAY_BLOCK"
-            else:
-                state = "IN_DAY_BLOCK"
+            current_date = date_str
+            state = "IN_DAY_BLOCK"
             continue
 
-        # Check message start
-        m_msg = RE_MESSAGE_START.match(line)
-        if m_msg and current_date:
+        # Skip unsent message markers (desktop export)
+        if RE_UNSENT.match(line.strip()):
+            continue
+
+        # Check message start (tab-sep or space-sep)
+        msg_match = _try_match_message(line)
+        if msg_match and current_date:
             finalize_message()
+            time_str, speaker, text = msg_match
             msg_counter += 1
             current_msg = {
                 "message_id": f"msg-{msg_counter:04d}",
                 "line_start": line_num,
                 "line_end": line_num,
                 "date": current_date,
-                "time": m_msg.group(1),
-                "speaker_raw": m_msg.group(2),
-                "speaker_role": resolve_speaker_role(m_msg.group(2), config),
-                "_text_parts": [m_msg.group(3)],
+                "time": time_str,
+                "speaker_raw": speaker,
+                "speaker_role": resolve_speaker_role(speaker, config),
+                "_text_parts": [text],
             }
             state = "IN_MESSAGE"
             continue
@@ -233,6 +303,12 @@ def parse_lines(lines: list[str], source_meta: dict, config: dict) -> dict:
 
     # Finalize last message
     finalize_message()
+
+    # --- Context-aware reclassification ---
+    # Short English messages that sit near lesson-content messages are likely
+    # student annotations (grammar notes, translations, explanations) rather
+    # than logistics.  Promote them so they appear in the lesson view.
+    _reclassify_by_context(messages)
 
     # --- Build sessions from messages grouped by date ---
     sessions = _build_sessions(messages, config, warnings)
@@ -272,6 +348,49 @@ def parse_lines(lines: list[str], source_meta: dict, config: dict) -> dict:
         "diagnostics": diagnostics,
         "preamble": preamble_lines,
     }
+
+
+def _reclassify_by_context(messages: list[dict], window: int = 2) -> None:
+    """Promote short English messages to lesson-content when they appear
+    near lesson-content messages on the same date.
+
+    Student follow-ups like "Verb object" or "Shi...de around things I want
+    to emphasize" are grammar annotations, not logistics.  We look at a
+    window of surrounding messages and promote if neighbours are lesson
+    content.
+    """
+    for i, msg in enumerate(messages):
+        if msg["message_type"] not in ("logistics", "other"):
+            continue
+        # Skip system messages (unsent notifications, etc.)
+        if any(t.startswith("system") for t in msg.get("tags", [])):
+            continue
+        # Only reclassify messages that aren't clearly logistics patterns
+        # like scheduling or greetings
+        text = msg.get("text_raw", "").strip()
+        if not text or len(text) > 120:
+            continue
+
+        # Check if any neighbouring messages (same date) are lesson-content
+        has_lesson_neighbour = False
+        for offset in range(-window, window + 1):
+            if offset == 0:
+                continue
+            j = i + offset
+            if j < 0 or j >= len(messages):
+                continue
+            neighbour = messages[j]
+            if neighbour["date"] != msg["date"]:
+                continue
+            if neighbour["message_type"] == "lesson-content":
+                has_lesson_neighbour = True
+                break
+
+        if has_lesson_neighbour:
+            msg["message_type"] = "lesson-content"
+            msg["language_hint"] = "en"
+            if "context-promoted" not in msg.get("tags", []):
+                msg.setdefault("tags", []).append("context-promoted")
 
 
 def _build_sessions(messages: list[dict], config: dict, warnings: list) -> list:
@@ -314,6 +433,8 @@ def _build_sessions(messages: list[dict], config: dict, warnings: list) -> list:
             logistics_count = sum(1 for m in group if m["message_type"] == "logistics")
             media_count = sum(1 for m in group if m["message_type"] == "media-reference")
             links_count = sum(1 for m in group if m["message_type"] == "link")
+            teacher_msg_count = sum(1 for m in group if m["speaker_role"] == "teacher")
+            student_msg_count = sum(1 for m in group if m["speaker_role"] == "student")
 
             # Boundary confidence
             if content_count >= 5:
@@ -351,6 +472,8 @@ def _build_sessions(messages: list[dict], config: dict, warnings: list) -> list:
                 "logistics_count": logistics_count,
                 "media_count": media_count,
                 "links_count": links_count,
+                "teacher_message_count": teacher_msg_count,
+                "student_message_count": student_msg_count,
                 "messages": session_messages,
             })
 
@@ -376,6 +499,7 @@ def _compute_stats(messages: list[dict], sessions: list[dict]) -> dict:
         "pinyin_diacritic_count": sum(1 for m in messages if "pinyin-diacritic" in m.get("tags", [])),
         "zhuyin_count": sum(1 for m in messages if "zhuyin" in m.get("tags", [])),
         "bilingual_pair_count": sum(1 for m in messages if "bilingual-pair" in m.get("tags", [])),
+        "pinyin_informal_count": sum(1 for m in messages if "pinyin-informal" in m.get("tags", [])),
     }
     return stats
 

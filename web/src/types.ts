@@ -22,6 +22,7 @@ export interface AdminUser {
   display_name: string;
   is_admin: boolean;
   status: string;
+  role: 'student' | 'teacher';
   last_login_at: string | null;
   created_at: string;
 }
@@ -52,9 +53,13 @@ export interface Session {
   end_time: string;
   message_count: number;
   lesson_content_count: number;
+  teacher_message_count: number;
+  student_message_count: number;
+  is_archived: boolean;
   boundary_confidence: 'high' | 'medium' | 'low';
   topics: string[];
   has_summary: boolean;
+  needs_summary: boolean;
   shared_links: SharedLink[];
 }
 
@@ -185,4 +190,60 @@ export interface SessionAttachment {
   match_confidence: 'high' | 'medium' | 'low' | 'unmatched';
   match_reason: string;
   assigned_by: 'auto' | 'manual';
+}
+
+export interface Annotation {
+  id: number;
+  session_id: string;
+  target_type: 'message' | 'summary_item' | 'summary_section';
+  target_id: string;
+  target_section?: string;
+  annotation_type: 'correction' | 'note' | 'flag' | 'reclassify';
+  content: Record<string, unknown>;
+  status: 'active' | 'applied' | 'dismissed';
+  created_by_role?: 'student' | 'teacher';
+  created_at: string;
+}
+
+export interface AIReviewFinding {
+  message_id?: string;
+  current_type?: string;
+  suggested_type?: string;
+  current_role?: string | null;
+  suggested_role?: string | null;
+  section?: string;
+  item_id?: string | null;
+  field?: string;
+  current_value?: string;
+  suggested_value?: string;
+  issue?: string;
+  confidence: number;
+  reason: string;
+  status: 'pending' | 'accepted' | 'dismissed';
+}
+
+export interface AIReview {
+  id: number;
+  session_id: string;
+  review_type: 'parse' | 'summary';
+  provider?: string;
+  model?: string;
+  findings: AIReviewFinding[];
+  findings_count: number;
+  accepted_count: number;
+  dismissed_count: number;
+  status: string;
+  created_at: string;
+}
+
+export interface ReparseResult {
+  run_id: string;
+  total_sessions: number;
+  updated_sessions: number;
+  new_sessions: number;
+  total_messages: number;
+  lesson_content_count: number;
+  auto_archived?: number;
+  auto_unarchived?: number;
+  user_overrides_applied?: number;
 }
