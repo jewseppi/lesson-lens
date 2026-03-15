@@ -65,7 +65,25 @@ const METRIC_LABELS: Record<string, string> = {
 
 const QUALITY_METRICS = ['schema_valid', 'content_coverage', 'pedagogical_structure', 'hallucination_proxy'];
 
-type Tab = 'scorecard' | 'runs' | 'policies';
+interface FineTuneRun {
+  id: number;
+  base_model: string;
+  adapter_name: string | null;
+  training_records: number;
+  status: string;
+  config: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  output_path: string | null;
+  started_at: string;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
+interface AdminSettings {
+  [key: string]: { value: string; updated_at: string };
+}
+
+type Tab = 'scorecard' | 'runs' | 'policies' | 'finetune';
 
 function ScoreBar({ value }: { value: number }) {
   const pct = Math.min(100, value * 100);
@@ -94,6 +112,8 @@ export default function EvalPage() {
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [scorecard, setScorecard] = useState<ScorecardEntry[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
+  const [ftRuns, setFtRuns] = useState<FineTuneRun[]>([]);
+  const [adminSettings, setAdminSettings] = useState<AdminSettings>({});
   const [selectedRun, setSelectedRun] = useState<EvalRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -103,10 +123,14 @@ export default function EvalPage() {
       apiJson<EvalRun[]>('/api/eval/runs').catch(() => []),
       apiJson<ScorecardEntry[]>('/api/eval/scorecard').catch(() => []),
       apiJson<Policy[]>('/api/policies').catch(() => []),
-    ]).then(([r, s, p]) => {
+      apiJson<FineTuneRun[]>('/api/fine-tune/runs').catch(() => []),
+      apiJson<AdminSettings>('/api/admin/settings').catch(() => ({})),
+    ]).then(([r, s, p, ft, settings]) => {
       setRuns(r);
       setScorecard(s);
       setPolicies(p);
+      setFtRuns(ft);
+      setAdminSettings(settings);
     }).catch(() => setError('Failed to load evaluation data'))
       .finally(() => setLoading(false));
   };
@@ -140,7 +164,7 @@ export default function EvalPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-gray-800 pb-px">
-        {([['scorecard', 'Scorecard'], ['runs', 'Runs'], ['policies', 'Policies']] as const).map(([key, label]) => (
+        {([['scorecard', 'Scorecard'], ['runs', 'Runs'], ['policies', 'Policies'], ['finetune', 'Fine-Tune']] as const).map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -159,6 +183,7 @@ export default function EvalPage() {
       {tab === 'scorecard' && <ScorecardTab scorecard={scorecard} runs={runs} />}
       {tab === 'runs' && <RunsTab runs={runs} selectedRun={selectedRun} onSelect={loadRunDetail} />}
       {tab === 'policies' && <PoliciesTab policies={policies} onReload={reload} setError={setError} />}
+      {tab === 'finetune' && <FineTuneTab ftRuns={ftRuns} settings={adminSettings} onReload={reload} setError={setError} />}
     </div>
   );
 }
@@ -541,6 +566,184 @@ function PoliciesTab({ policies, onReload, setError }: {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function FineTuneTab({ ftRuns, settings, onReload, setError }: {
+  ftRuns: FineTuneRun[];
+  settings: AdminSettings;
+  onReload: () => void;
+  setError: (msg: string) => void;
+}) {
+  const enabled = settings.fine_tuning_enabled?.value === 'true';
+  const [creating, setCreating] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [baseModel, setBaseModel] = useState('Qwen/Qwen2.5-7B-Instruct');
+
+  const toggleFeature = async () => {
+    try {
+      await apiJson('/api/admin/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ fine_tuning_enabled: enabled ? 'false' : 'true' }),
+      });
+      onReload();
+    } catch {
+      setError('Failed to update setting');
+    }
+  };
+
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const data = await apiJson<{ count: number }>('/api/fine-tune/export', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      alert(`Exported ${data.count} training records. Use /api/fine-tune/export/jsonl to download as file.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const createRun = async () => {
+    setCreating(true);
+    try {
+      await apiJson('/api/fine-tune/runs', {
+        method: 'POST',
+        body: JSON.stringify({ base_model: baseModel }),
+      });
+      onReload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create run');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Feature flag */}
+      <div className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <div>
+          <div className="font-medium text-white">Fine-Tuning (Phase 5)</div>
+          <div className="text-xs text-gray-400 mt-0.5">
+            Export training data and manage LoRA adapter training runs. Optional — only needed if RAG/retrieval quality plateaus.
+          </div>
+        </div>
+        <button onClick={toggleFeature}
+          className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+            enabled ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-400'
+          }`}>
+          {enabled ? 'Enabled' : 'Disabled'}
+        </button>
+      </div>
+
+      {!enabled && (
+        <p className="text-gray-600 text-sm">Enable fine-tuning above to access training data export and run management.</p>
+      )}
+
+      {enabled && (
+        <>
+          {/* Export */}
+          <section className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <h3 className="font-semibold text-white">Export Training Data</h3>
+            <p className="text-xs text-gray-400">
+              Exports de-identified transcript → lesson summary pairs in JSONL format for LoRA fine-tuning.
+            </p>
+            <button onClick={exportData} disabled={exporting}
+              className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium">
+              {exporting ? 'Exporting...' : 'Preview Export'}
+            </button>
+            <div className="text-xs text-gray-500 mt-1">
+              To download: <code className="bg-gray-800 px-1 py-0.5 rounded">
+                curl -X POST /api/fine-tune/export/jsonl -H "Authorization: Bearer TOKEN" -o training-data.jsonl
+              </code>
+            </div>
+          </section>
+
+          {/* Create run */}
+          <section className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <h3 className="font-semibold text-white">New Fine-Tune Run</h3>
+            <div className="flex gap-3 items-end">
+              <div className="flex-1">
+                <label className="text-xs text-gray-400 block mb-1">Base Model</label>
+                <select value={baseModel} onChange={e => setBaseModel(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white">
+                  <option value="Qwen/Qwen2.5-3B-Instruct">Qwen2.5 3B (fast, lower quality)</option>
+                  <option value="Qwen/Qwen2.5-7B-Instruct">Qwen2.5 7B (recommended)</option>
+                  <option value="Qwen/Qwen2.5-14B-Instruct">Qwen2.5 14B (best quality, needs GPU)</option>
+                </select>
+              </div>
+              <button onClick={createRun} disabled={creating}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium flex-shrink-0">
+                {creating ? 'Creating...' : 'Create Run'}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Creates a run record. Actual training is done via CLI:
+              <code className="bg-gray-800 px-1 py-0.5 rounded ml-1">
+                python scripts/lora_train.py --data training-data.jsonl --run-id RUN_ID
+              </code>
+            </p>
+          </section>
+
+          {/* Runs list */}
+          <section>
+            <h3 className="font-semibold text-white mb-3">Fine-Tune Runs</h3>
+            {ftRuns.length === 0 && <p className="text-gray-600 text-sm">No fine-tune runs yet.</p>}
+            <div className="space-y-2">
+              {ftRuns.map(run => (
+                <div key={run.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <span className="font-medium text-white">#{run.id}</span>
+                      <span className="text-gray-500 mx-2">{run.base_model}</span>
+                      {run.adapter_name && <span className="text-indigo-400 text-sm">→ {run.adapter_name}</span>}
+                    </div>
+                    <div className="flex items-center gap-3 text-sm">
+                      <StatusBadge status={run.status} />
+                      {run.training_records > 0 && (
+                        <span className="text-gray-500">{run.training_records} records</span>
+                      )}
+                      <span className="text-gray-600 text-xs">{(run.started_at || '').split(' ')[0]}</span>
+                    </div>
+                  </div>
+                  {run.metrics && Object.keys(run.metrics).length > 0 && (
+                    <div className="mt-2 flex gap-4 text-xs text-gray-400 flex-wrap">
+                      {run.metrics.train_loss !== undefined && <span>Loss: {Number(run.metrics.train_loss).toFixed(4)}</span>}
+                      {run.metrics.train_runtime !== undefined && <span>Runtime: {Number(run.metrics.train_runtime).toFixed(0)}s</span>}
+                      {run.metrics.epochs !== undefined && <span>Epochs: {String(run.metrics.epochs)}</span>}
+                      {run.metrics.rank !== undefined && <span>Rank: {String(run.metrics.rank)}</span>}
+                    </div>
+                  )}
+                  {run.output_path && (
+                    <div className="mt-1 text-xs text-gray-600">Adapter: {run.output_path}</div>
+                  )}
+                  {run.error_message && (
+                    <div className="mt-1 text-xs text-red-400">{run.error_message}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* How-to */}
+          <section className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
+            <h3 className="font-semibold text-white">Training Workflow</h3>
+            <ol className="text-xs text-gray-400 list-decimal list-inside space-y-1">
+              <li>Export training data via the button above or curl command</li>
+              <li>Create a fine-tune run record (tracks status and metrics)</li>
+              <li>Run training: <code className="bg-gray-800 px-1 py-0.5 rounded">python scripts/lora_train.py --data training-data.jsonl --run-id ID --token TOKEN</code></li>
+              <li>Create Ollama model: <code className="bg-gray-800 px-1 py-0.5 rounded">python scripts/lora_train.py --create-modelfile --adapter-path ./lora-adapters/lessonlens --base-model qwen2.5:7b --output Modelfile</code></li>
+              <li>Register in Ollama: <code className="bg-gray-800 px-1 py-0.5 rounded">ollama create lessonlens-qwen7b -f Modelfile</code></li>
+              <li>Select the fine-tuned model in Settings → Provider → Ollama</li>
+            </ol>
+          </section>
+        </>
       )}
     </div>
   );

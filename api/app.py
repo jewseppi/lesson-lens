@@ -940,6 +940,42 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
         CREATE INDEX IF NOT EXISTS idx_feedback_memory_user ON user_feedback_memory(user_id, target_type);
+
+        CREATE TABLE IF NOT EXISTS admin_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_by INTEGER,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS fine_tune_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_by INTEGER NOT NULL,
+            base_model TEXT NOT NULL,
+            adapter_name TEXT,
+            training_records INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            config_json TEXT DEFAULT '{}',
+            metrics_json TEXT DEFAULT '{}',
+            output_path TEXT,
+            started_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            error_message TEXT,
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS fine_tune_training_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fine_tune_run_id INTEGER,
+            user_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            system_prompt TEXT,
+            user_content TEXT NOT NULL,
+            assistant_content TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (fine_tune_run_id) REFERENCES fine_tune_runs(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
     """)
 
     # Migrations for existing databases
@@ -3259,6 +3295,382 @@ def retrieval_stats():
             "total_items": sum(row["count"] for row in items),
             "total_feedback": sum(row["count"] for row in feedback),
         })
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Fine-Tuning (Phase 5) - behind admin flag
+# ---------------------------------------------------------------------------
+
+def _is_feature_enabled(conn, feature_key, default=False):
+    """Check if a feature flag is enabled in admin_settings."""
+    row = conn.execute(
+        "SELECT value FROM admin_settings WHERE key = ?", (feature_key,)
+    ).fetchone()
+    if not row:
+        return default
+    return row["value"].lower() in ("true", "1", "yes", "enabled")
+
+
+@app.route("/api/admin/settings", methods=["GET"])
+@jwt_required()
+def get_admin_settings():
+    """Get all admin settings."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        rows = conn.execute("SELECT key, value, updated_at FROM admin_settings").fetchall()
+        return jsonify({r["key"]: {"value": r["value"], "updated_at": r["updated_at"]} for r in rows})
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin/settings", methods=["PUT"])
+@jwt_required()
+def update_admin_settings():
+    """Update admin settings. Body: { key: value, ... }"""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        for key, value in data.items():
+            conn.execute(
+                """INSERT INTO admin_settings (key, value, updated_by, updated_at)
+                   VALUES (?, ?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET value = ?, updated_by = ?, updated_at = datetime('now')""",
+                (key, str(value), user["id"], str(value), user["id"]),
+            )
+        conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/fine-tune/export", methods=["POST"])
+@jwt_required()
+def export_training_data():
+    """Export de-identified training records from user summaries.
+    Body: { sessions?: list[str], include_retrieval_context?: bool }
+    Returns: { records: list, count: int }
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        if not _is_feature_enabled(conn, "fine_tuning_enabled"):
+            return jsonify({"error": "Fine-tuning is not enabled. Enable it in Admin Settings."}), 403
+
+        data = request.get_json() or {}
+        session_filter = data.get("sessions")  # optional list of session IDs
+        include_retrieval = data.get("include_retrieval_context", False)
+
+        # Load all completed summaries
+        query = """SELECT ls.session_id, ls.lesson_data_json, ls.provider, ls.model, ls.user_id
+                   FROM lesson_summaries ls
+                   WHERE ls.lesson_data_json IS NOT NULL"""
+        params = []
+        if session_filter:
+            placeholders = ",".join("?" for _ in session_filter)
+            query += f" AND ls.session_id IN ({placeholders})"
+            params.extend(session_filter)
+
+        summaries = conn.execute(query, params).fetchall()
+
+        records = []
+        for row in summaries:
+            lesson_data = json.loads(row["lesson_data_json"])
+            session_id = row["session_id"]
+            summary_user_id = row["user_id"]
+
+            # Load the source transcript
+            run = conn.execute(
+                """SELECT pr.output_dir FROM parse_runs pr
+                   WHERE pr.user_id = ? AND pr.status = 'completed'
+                   ORDER BY pr.completed_at DESC LIMIT 1""",
+                (summary_user_id,),
+            ).fetchone()
+
+            if not run:
+                continue
+
+            sessions_path = os.path.join(run["output_dir"], "sessions.json")
+            if not os.path.isfile(sessions_path):
+                continue
+
+            with open(sessions_path, "r", encoding="utf-8") as f:
+                sessions_data = json.load(f)
+
+            session_data = None
+            for s in sessions_data.get("sessions", []):
+                if s["session_id"] == session_id:
+                    session_data = s
+                    break
+
+            if not session_data:
+                continue
+
+            # Build de-identified transcript
+            from scripts.generate_outputs import build_transcript_text, load_prompt
+            transcript = build_transcript_text(session_data)
+
+            # De-identify: replace speaker names with generic labels
+            transcript = transcript.replace(
+                session_data.get("messages", [{}])[0].get("speaker_raw", ""),
+                "Teacher" if session_data.get("messages", [{}])[0].get("speaker_role") == "teacher" else "Student",
+            )
+
+            # Build the expected output (lesson_data minus metadata)
+            output = {k: v for k, v in lesson_data.items()
+                      if k not in ("generation_meta", "assets", "lesson_id", "source_session_ids")}
+
+            system_prompt = load_prompt("master-summarizer")
+
+            user_content = transcript
+            if include_retrieval:
+                context = _retrieve_context_for_session(conn, summary_user_id, session_id, session_data)
+                context_block = build_retrieval_context_block(context)
+                if context_block:
+                    user_content = context_block + "\n" + transcript
+
+            records.append({
+                "session_id": session_id,
+                "system": system_prompt,
+                "user": user_content,
+                "assistant": json.dumps(output, ensure_ascii=False),
+            })
+
+        return jsonify({"records": records, "count": len(records)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/fine-tune/export/jsonl", methods=["POST"])
+@jwt_required()
+def export_training_jsonl():
+    """Export training data as JSONL format (compatible with most fine-tuning frameworks).
+    Body: same as /api/fine-tune/export
+    Returns: JSONL text file download.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+        if not _is_feature_enabled(conn, "fine_tuning_enabled"):
+            return jsonify({"error": "Fine-tuning is not enabled"}), 403
+
+        # Reuse the export logic
+        from flask import Response
+
+        data = request.get_json() or {}
+        with app.test_request_context(json=data):
+            # Call export_training_data internally
+            pass
+
+        # Re-fetch to avoid nested context issues
+        session_filter = data.get("sessions")
+        query = """SELECT ls.session_id, ls.lesson_data_json, ls.user_id
+                   FROM lesson_summaries ls WHERE ls.lesson_data_json IS NOT NULL"""
+        params = []
+        if session_filter:
+            placeholders = ",".join("?" for _ in session_filter)
+            query += f" AND ls.session_id IN ({placeholders})"
+            params.extend(session_filter)
+
+        summaries = conn.execute(query, params).fetchall()
+
+        from scripts.generate_outputs import build_transcript_text, load_prompt
+        system_prompt = load_prompt("master-summarizer")
+        lines = []
+
+        for row in summaries:
+            lesson_data = json.loads(row["lesson_data_json"])
+            session_id = row["session_id"]
+            summary_user_id = row["user_id"]
+
+            run = conn.execute(
+                """SELECT pr.output_dir FROM parse_runs pr
+                   WHERE pr.user_id = ? AND pr.status = 'completed'
+                   ORDER BY pr.completed_at DESC LIMIT 1""",
+                (summary_user_id,),
+            ).fetchone()
+            if not run:
+                continue
+
+            sessions_path = os.path.join(run["output_dir"], "sessions.json")
+            if not os.path.isfile(sessions_path):
+                continue
+
+            with open(sessions_path, "r", encoding="utf-8") as f:
+                sessions_data = json.load(f)
+
+            session_data = None
+            for s in sessions_data.get("sessions", []):
+                if s["session_id"] == session_id:
+                    session_data = s
+                    break
+            if not session_data:
+                continue
+
+            transcript = build_transcript_text(session_data)
+            output = {k: v for k, v in lesson_data.items()
+                      if k not in ("generation_meta", "assets", "lesson_id", "source_session_ids")}
+
+            record = {
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": transcript},
+                    {"role": "assistant", "content": json.dumps(output, ensure_ascii=False)},
+                ]
+            }
+            lines.append(json.dumps(record, ensure_ascii=False))
+
+        return Response(
+            "\n".join(lines),
+            mimetype="application/jsonl",
+            headers={"Content-Disposition": "attachment; filename=training-data.jsonl"},
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/fine-tune/runs", methods=["GET"])
+@jwt_required()
+def list_fine_tune_runs():
+    """List fine-tune runs."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        rows = conn.execute(
+            "SELECT * FROM fine_tune_runs ORDER BY started_at DESC"
+        ).fetchall()
+
+        runs = []
+        for r in rows:
+            runs.append({
+                "id": r["id"],
+                "base_model": r["base_model"],
+                "adapter_name": r["adapter_name"],
+                "training_records": r["training_records"],
+                "status": r["status"],
+                "config": json.loads(r["config_json"]) if r["config_json"] else {},
+                "metrics": json.loads(r["metrics_json"]) if r["metrics_json"] else {},
+                "output_path": r["output_path"],
+                "started_at": r["started_at"],
+                "completed_at": r["completed_at"],
+                "error_message": r["error_message"],
+            })
+        return jsonify(runs)
+    finally:
+        conn.close()
+
+
+@app.route("/api/fine-tune/runs", methods=["POST"])
+@jwt_required()
+def create_fine_tune_run():
+    """Create a fine-tune run record. Actual training is done via CLI script.
+    Body: { base_model, adapter_name?, config?: { epochs, lr, lora_rank, ... } }
+    """
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+        if not _is_feature_enabled(conn, "fine_tuning_enabled"):
+            return jsonify({"error": "Fine-tuning is not enabled"}), 403
+
+        base_model = data.get("base_model")
+        if not base_model:
+            return jsonify({"error": "base_model is required"}), 400
+
+        adapter_name = data.get("adapter_name", f"lessonlens-{base_model.replace(':', '-')}")
+        config = data.get("config", {
+            "epochs": 3,
+            "learning_rate": 2e-4,
+            "lora_rank": 16,
+            "lora_alpha": 32,
+            "batch_size": 4,
+        })
+
+        cursor = conn.execute(
+            """INSERT INTO fine_tune_runs
+               (created_by, base_model, adapter_name, config_json)
+               VALUES (?, ?, ?, ?)""",
+            (user["id"], base_model, adapter_name, json.dumps(config)),
+        )
+        conn.commit()
+        return jsonify({"id": cursor.lastrowid}), 201
+    finally:
+        conn.close()
+
+
+@app.route("/api/fine-tune/runs/<int:run_id>", methods=["PUT"])
+@jwt_required()
+def update_fine_tune_run(run_id):
+    """Update a fine-tune run status/metrics (used by training script)."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+        if not user["is_admin"]:
+            return jsonify({"error": "Admin only"}), 403
+
+        existing = conn.execute("SELECT id FROM fine_tune_runs WHERE id = ?", (run_id,)).fetchone()
+        if not existing:
+            return jsonify({"error": "Run not found"}), 404
+
+        updates = []
+        params = []
+        for field in ["status", "output_path", "adapter_name", "error_message", "training_records"]:
+            if field in data:
+                updates.append(f"{field} = ?")
+                params.append(data[field])
+        if "metrics" in data:
+            updates.append("metrics_json = ?")
+            params.append(json.dumps(data["metrics"]))
+        if data.get("status") == "completed":
+            updates.append("completed_at = datetime('now')")
+
+        if updates:
+            params.append(run_id)
+            conn.execute(f"UPDATE fine_tune_runs SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+
+        return jsonify({"ok": True})
     finally:
         conn.close()
 
