@@ -169,50 +169,44 @@ function SessionCard({ session: s, onArchive }: { session: Session; onArchive: (
             </div>
           )}
         </div>
-        <div className="flex items-start gap-3">
-          <div className="text-sm sm:text-right">
-            <div className="flex gap-3 sm:justify-end">
-              {s.teacher_message_count > 0 && (
-                <span>
-                  <span className="text-pink-400 font-medium">{s.teacher_message_count}</span>
-                  <span className="text-gray-500"> teacher</span>
-                </span>
-              )}
-              {s.student_message_count > 0 && (
-                <span>
-                  <span className="text-cyan-400 font-medium">{s.student_message_count}</span>
-                  <span className="text-gray-500"> me</span>
-                </span>
-              )}
-            </div>
-            <div className="text-gray-500">{s.message_count} total</div>
-            {s.has_summary && (
-              <Link
-                to={`/sessions/${s.session_id}/summary`}
-                onClick={e => e.stopPropagation()}
-                className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs hover:bg-green-800 transition-colors"
-              >
-                Summary
-              </Link>
+        <div className="text-sm sm:text-right">
+          <div className="flex gap-3 sm:justify-end">
+            {s.teacher_message_count > 0 && (
+              <span>
+                <span className="text-pink-400 font-medium">{s.teacher_message_count}</span>
+                <span className="text-gray-500"> teacher</span>
+              </span>
             )}
-            {s.needs_summary && (
-              <Link
-                to={`/sessions/${s.session_id}/summary`}
-                onClick={e => e.stopPropagation()}
-                className="inline-flex items-center gap-1 mt-1 bg-amber-900/60 text-amber-400 px-2 py-0.5 rounded text-xs hover:bg-amber-900 transition-colors"
-                title="No summary yet — click to generate"
-              >
-                <span className="opacity-70">&#x26A0;</span> Generate
-              </Link>
+            {s.student_message_count > 0 && (
+              <span>
+                <span className="text-cyan-400 font-medium">{s.student_message_count}</span>
+                <span className="text-gray-500"> me</span>
+              </span>
             )}
           </div>
-          <button
-            onClick={(e) => onArchive(s.session_id, e)}
-            className="shrink-0 p-1 text-gray-600 hover:text-gray-300 transition-colors"
-            title={s.is_archived ? 'Unarchive' : 'Archive'}
-          >
-            {s.is_archived ? '↩' : '📦'}
-          </button>
+          <div className="text-gray-500">{s.message_count} total</div>
+          {s.has_summary && (
+            <Link
+              to={`/sessions/${s.session_id}/summary`}
+              onClick={e => e.stopPropagation()}
+              className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs hover:bg-green-800 transition-colors"
+            >
+              Summary
+            </Link>
+          )}
+          {s.needs_summary && !s.has_summary && (
+            <span className="inline-block mt-1 text-gray-600 text-xs">No summary</span>
+          )}
+          {/* Unarchive button only shown in archived section */}
+          {s.is_archived && (
+            <button
+              onClick={(e) => onArchive(s.session_id, e)}
+              className="mt-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              title="Unarchive"
+            >
+              ↩ Unarchive
+            </button>
+          )}
         </div>
       </div>
 
