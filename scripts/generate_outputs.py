@@ -8,6 +8,7 @@ Supports OpenAI, Anthropic (Claude), and Gemini. Provider/model can be
 overridden per run via CLI flags.
 """
 import argparse
+import base64
 import csv
 import json
 import os
@@ -37,7 +38,17 @@ def load_prompt(name: str) -> str:
 # LLM provider adapters
 # ---------------------------------------------------------------------------
 
-def call_openai(prompt: str, user_content: str, model: str, temperature: float) -> str:
+def _encode_image(path: str) -> tuple[str, str]:
+    """Read an image file and return (base64_data, media_type)."""
+    ext = os.path.splitext(path)[1].lower()
+    media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+    media_type = media_types.get(ext, "image/jpeg")
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8"), media_type
+
+
+def call_openai(prompt: str, user_content: str, model: str, temperature: float,
+                image_paths: list[str] | None = None) -> str:
     try:
         from openai import OpenAI
     except ImportError:
@@ -45,18 +56,30 @@ def call_openai(prompt: str, user_content: str, model: str, temperature: float) 
         sys.exit(1)
 
     client = OpenAI()  # uses OPENAI_API_KEY env var
+
+    # Build multimodal content if images are provided
+    if image_paths:
+        content_parts: list[dict] = [{"type": "text", "text": user_content}]
+        for img_path in image_paths:
+            b64, mtype = _encode_image(img_path)
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mtype};base64,{b64}"},
+            })
+        user_msg: dict = {"role": "user", "content": content_parts}
+    else:
+        user_msg = {"role": "user", "content": user_content}
+
     response = client.chat.completions.create(
         model=model,
         temperature=temperature,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_content},
-        ],
+        messages=[{"role": "system", "content": prompt}, user_msg],
     )
     return response.choices[0].message.content
 
 
-def call_anthropic(prompt: str, user_content: str, model: str, temperature: float) -> str:
+def call_anthropic(prompt: str, user_content: str, model: str, temperature: float,
+                   image_paths: list[str] | None = None) -> str:
     try:
         import anthropic
     except ImportError:
@@ -64,19 +87,32 @@ def call_anthropic(prompt: str, user_content: str, model: str, temperature: floa
         sys.exit(1)
 
     client = anthropic.Anthropic()  # uses ANTHROPIC_API_KEY env var
+
+    # Build multimodal content if images are provided
+    if image_paths:
+        content_parts: list[dict] = [{"type": "text", "text": user_content}]
+        for img_path in image_paths:
+            b64, mtype = _encode_image(img_path)
+            content_parts.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mtype, "data": b64},
+            })
+        user_msg_content: str | list = content_parts
+    else:
+        user_msg_content = user_content
+
     response = client.messages.create(
         model=model,
         max_tokens=8192,
         temperature=temperature,
         system=prompt,
-        messages=[
-            {"role": "user", "content": user_content},
-        ],
+        messages=[{"role": "user", "content": user_msg_content}],
     )
     return response.content[0].text
 
 
-def call_gemini(prompt: str, user_content: str, model: str, temperature: float) -> str:
+def call_gemini(prompt: str, user_content: str, model: str, temperature: float,
+                image_paths: list[str] | None = None) -> str:
     try:
         import google.generativeai as genai
     except ImportError:
@@ -103,7 +139,8 @@ def call_gemini(prompt: str, user_content: str, model: str, temperature: float) 
     return response.text
 
 
-def call_ollama(prompt: str, user_content: str, model: str, temperature: float) -> str:
+def call_ollama(prompt: str, user_content: str, model: str, temperature: float,
+                image_paths: list[str] | None = None) -> str:
     import json as _json
     from urllib import error as _urlerr
     from urllib import request as _urlreq
@@ -134,7 +171,8 @@ def call_ollama(prompt: str, user_content: str, model: str, temperature: float) 
     return data["message"]["content"]
 
 
-def call_openai_compatible_local(prompt: str, user_content: str, model: str, temperature: float) -> str:
+def call_openai_compatible_local(prompt: str, user_content: str, model: str, temperature: float,
+                                image_paths: list[str] | None = None) -> str:
     try:
         from openai import OpenAI
     except ImportError:
@@ -167,21 +205,30 @@ PROVIDERS = {
 # Transcript builder — assembles the user prompt for the LLM
 # ---------------------------------------------------------------------------
 
-def build_transcript_text(session: dict, reclassifications: dict | None = None) -> str:
+def build_transcript_text(session: dict, reclassifications: dict | None = None,
+                          attachments: list[dict] | None = None) -> str:
     """Build a readable transcript block from a session for the LLM.
 
     Args:
         session: Session dict with messages array.
         reclassifications: Optional dict mapping message_id -> corrected message_type.
             When provided, reclassified messages are annotated in the transcript.
+        attachments: Optional list of attachment dicts with 'original_filename' and
+            optionally 'ocr_text'. When provided, media-reference messages are
+            annotated with attachment info instead of being skipped.
     """
     lines = []
     lines.append(f"## Lesson: {session['date']} ({session['start_time']}–{session['end_time']})")
     lines.append(f"Session ID: {session['session_id']}")
     lines.append(f"Messages: {session['message_count']} total, {session['lesson_content_count']} lesson-content")
+    if attachments:
+        lines.append(f"Attached images: {len(attachments)}")
     lines.append("")
 
     reclass = reclassifications or {}
+
+    # Track which attachment to associate with each media-reference message
+    att_iter = iter(attachments or [])
 
     for msg in session.get("messages", []):
         role = msg.get("speaker_role", "unknown")
@@ -190,10 +237,25 @@ def build_transcript_text(session: dict, reclassifications: dict | None = None) 
         mtype = msg.get("message_type", "")
         time_str = msg.get("time", "")
 
-        if mtype in ("media-reference", "call-system"):
-            continue  # skip per prompt rules
+        if mtype == "call-system":
+            continue  # skip system call notifications
 
         label = "Teacher" if role == "teacher" else ("Student" if role == "student" else "?")
+
+        if mtype == "media-reference":
+            # Include media-reference with attachment context instead of skipping
+            att = next(att_iter, None)
+            if att:
+                fname = att.get("original_filename", "image")
+                line = f"[{mid}] {time_str} {label}: [Sent image: {fname}]"
+                ocr = att.get("ocr_text")
+                if ocr:
+                    line += f" [Image text: {ocr}]"
+            else:
+                line = f"[{mid}] {time_str} {label}: [Sent image]"
+            lines.append(line)
+            continue
+
         line = f"[{mid}] {time_str} {label}: {raw}"
 
         # Annotate reclassified messages so the LLM knows to include/exclude them
@@ -438,13 +500,17 @@ def generate_csv(lesson: dict, output_path: str):
 def process_session(session: dict, config: dict, provider: str, model: str,
                     temperature: float, run_id: str, output_base: str,
                     corrections: list | None = None,
-                    retrieval_context: str | None = None) -> dict:
+                    retrieval_context: str | None = None,
+                    attachments: list[dict] | None = None) -> dict:
     """Run the full generation pipeline for one session.
 
     Args:
         corrections: Optional list of verified corrections to inject as context.
             Each is a dict with keys: type, message_id/item_id, original, corrected, detail.
         retrieval_context: Optional text block of prior knowledge from retrieval index.
+        attachments: Optional list of attachment dicts with 'original_filename',
+            'stored_filename' (full path), and optionally 'ocr_text'.
+            Images are sent to vision-capable providers (openai, anthropic).
     """
     session_id = session["session_id"]
     date = session["date"]
@@ -466,7 +532,8 @@ def process_session(session: dict, config: dict, provider: str, model: str,
     # --- Pass 1: Master summarizer ---
     print(f"\n[{session_id}] Pass 1: Generating lesson summary...")
     master_prompt = load_prompt("master-summarizer")
-    transcript_text = build_transcript_text(session, reclassifications=reclassifications)
+    transcript_text = build_transcript_text(session, reclassifications=reclassifications,
+                                            attachments=attachments)
 
     # Prepend retrieval context from prior sessions (Phase 4)
     if retrieval_context:
@@ -477,7 +544,18 @@ def process_session(session: dict, config: dict, provider: str, model: str,
     if correction_context:
         transcript_text = correction_context + "\n" + transcript_text
 
-    raw_summary = call_llm(master_prompt, transcript_text, model, temperature)
+    # Collect image paths for vision-capable providers
+    image_paths: list[str] = []
+    if attachments and provider in ("openai", "anthropic"):
+        for att in attachments:
+            path = att.get("stored_path")
+            if path and os.path.isfile(path):
+                image_paths.append(path)
+        if image_paths:
+            print(f"[{session_id}] Including {len(image_paths)} image(s) for vision...")
+
+    raw_summary = call_llm(master_prompt, transcript_text, model, temperature,
+                           image_paths=image_paths if image_paths else None)
 
     # Parse JSON response
     lesson_data = _parse_llm_json(raw_summary, "master-summarizer")
