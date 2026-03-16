@@ -147,20 +147,35 @@ def _parse_filename_timestamp(filename):
     return None
 
 
-def match_image_to_sessions(captured_at_local, sessions, margin_hours=2):
+def match_image_to_sessions(captured_at_local, sessions, margin_hours=2,
+                            unmatched_session_ids=None):
     """
     Match an image timestamp to sessions based on confidence bands.
 
     Args:
         captured_at_local: ISO datetime string of captured time (local)
-        sessions: list of dicts with 'session_id', 'date', 'start_time', 'end_time'
+        sessions: list of dicts with 'session_id', 'date', 'start_time', 'end_time',
+            and optionally 'messages' array
         margin_hours: hours of margin for 'medium' confidence
+        unmatched_session_ids: optional set of session IDs that still have unmatched
+            media-reference messages — used as a fallback when EXIF is missing
 
     Returns:
         dict with 'session_id', 'confidence' ('high'|'medium'|'low'|'unmatched'),
         and 'reason' string
     """
     if not captured_at_local:
+        # No timestamp — try content-based matching via media-reference messages
+        if unmatched_session_ids:
+            # Pick the session with unmatched media-reference messages
+            # (most recent first if multiple)
+            for sess in reversed(sessions):
+                if sess.get("session_id") in unmatched_session_ids:
+                    return {
+                        "session_id": sess["session_id"],
+                        "confidence": "medium",
+                        "reason": "media_reference_match",
+                    }
         return {"session_id": None, "confidence": "unmatched", "reason": "no_timestamp"}
 
     try:

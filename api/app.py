@@ -304,6 +304,27 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
     )
     retrieval_block = build_retrieval_context_block(retrieval_context)
 
+    # --- Load attachments for this session ---
+    att_rows = conn.execute(
+        """SELECT a.original_filename, a.stored_filename, a.mime_type
+           FROM session_attachments sa
+           JOIN attachments a ON sa.attachment_id = a.id
+           WHERE sa.session_id = ? AND sa.user_id = ?
+           ORDER BY a.id""",
+        (session_row["id"], user["id"]),
+    ).fetchall()
+    att_list = None
+    if att_rows:
+        att_list = []
+        for row in att_rows:
+            att_list.append({
+                "original_filename": row["original_filename"],
+                "stored_path": os.path.join(
+                    os.path.dirname(__file__), "..", "attachments", row["stored_filename"],
+                ),
+                "mime_type": row["mime_type"],
+            })
+
     gen_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     output_base = os.path.join(
         os.path.dirname(__file__), "..", "summaries", gen_run_id
@@ -319,6 +340,7 @@ def _generate_summary_for_session(conn, user, run, session_row, session_data, pr
         output_base,
         corrections=corrections if corrections else None,
         retrieval_context=retrieval_block if retrieval_block else None,
+        attachments=att_list,
     )
 
     lesson_json_path = os.path.join(result["output_dir"], "lesson-data.json")
@@ -3705,12 +3727,34 @@ def upload_attachments():
         # Load sessions for auto-matching
         run = _load_latest_completed_run(conn, user["id"])
         sessions = []
+        unmatched_session_ids = set()
         if run:
             rows = conn.execute(
-                "SELECT session_id, date, start_time, end_time FROM sessions WHERE user_id = ? AND run_id = ?",
+                "SELECT session_id, date, start_time, end_time, id FROM sessions WHERE user_id = ? AND run_id = ?",
                 (user["id"], run["run_id"]),
             ).fetchall()
             sessions = [dict(r) for r in rows]
+
+            # Find sessions with media-reference messages that don't yet have attachments
+            try:
+                sessions_payload = _load_sessions_payload(run)
+                for sid, sdata in sessions_payload.items():
+                    media_count = sum(
+                        1 for m in sdata.get("messages", [])
+                        if m.get("message_type") == "media-reference"
+                    )
+                    if media_count > 0:
+                        # Check how many attachments already matched
+                        srow = next((s for s in sessions if s["session_id"] == sid), None)
+                        if srow:
+                            matched = conn.execute(
+                                "SELECT COUNT(*) FROM session_attachments WHERE session_id = ? AND user_id = ?",
+                                (srow["id"], user["id"]),
+                            ).fetchone()[0]
+                            if matched < media_count:
+                                unmatched_session_ids.add(sid)
+            except (FileNotFoundError, Exception):
+                pass
 
         results = []
         for file in files:
@@ -3759,19 +3803,28 @@ def upload_attachments():
             )
             attachment_id = cursor.lastrowid
 
-            # Auto-match to session
-            match = match_image_to_sessions(exif["captured_at_local"], sessions)
+            # Auto-match to session (with media-reference fallback)
+            match = match_image_to_sessions(
+                exif["captured_at_local"], sessions,
+                unmatched_session_ids=unmatched_session_ids if unmatched_session_ids else None,
+            )
             session_attachment_id = None
             if match["session_id"]:
-                sa_cursor = conn.execute(
-                    """INSERT OR IGNORE INTO session_attachments
-                       (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
-                       VALUES (?, ?, ?, ?, ?, 'auto')""",
-                    (user["id"], match["session_id"], attachment_id,
-                     match["confidence"], match["reason"]),
+                # Resolve string session_id to DB integer id
+                matched_sess = next(
+                    (s for s in sessions if s["session_id"] == match["session_id"]), None
                 )
-                if sa_cursor.rowcount:
-                    session_attachment_id = sa_cursor.lastrowid
+                db_session_id = matched_sess["id"] if matched_sess else None
+                if db_session_id:
+                    sa_cursor = conn.execute(
+                        """INSERT OR IGNORE INTO session_attachments
+                           (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
+                           VALUES (?, ?, ?, ?, ?, 'auto')""",
+                        (user["id"], db_session_id, attachment_id,
+                         match["confidence"], match["reason"]),
+                    )
+                    if sa_cursor.rowcount:
+                        session_attachment_id = sa_cursor.lastrowid
 
             conn.commit()
 

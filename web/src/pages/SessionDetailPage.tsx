@@ -42,7 +42,7 @@ export default function SessionDetailPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showAll, setShowAll] = useState(false);
+  const [messageFilter, setMessageFilter] = useState<'all' | 'teacher' | 'me'>('all');
   const [attachments, setAttachments] = useState<SessionAttachment[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedMsg, setSelectedMsg] = useState<string | null>(null);
@@ -135,8 +135,11 @@ export default function SessionDetailPage() {
   if (loading) return <div className="text-gray-400">Loading...</div>;
   if (!session) return <div className="text-red-400">Session not found</div>;
 
-  const lessonMessages = session.messages.filter(m => m.message_type === 'lesson-content');
-  const displayMessages = showAll ? session.messages : lessonMessages;
+  const displayMessages = messageFilter === 'all'
+    ? session.messages
+    : messageFilter === 'teacher'
+      ? session.messages.filter(m => m.speaker_role === 'teacher')
+      : session.messages.filter(m => m.speaker_role === 'student');
 
   const annotationsByMsg = new Map<string, Annotation[]>();
   for (const a of annotations) {
@@ -198,14 +201,21 @@ export default function SessionDetailPage() {
 
       {/* Filter toggle */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-        <button
-          onClick={() => setShowAll(!showAll)}
-          className={`text-sm px-3 py-1 rounded-lg transition-colors ${
-            showAll ? 'bg-gray-700 text-white' : 'bg-indigo-600 text-white'
-          }`}
-        >
-          {showAll ? 'Show All' : 'Lesson Content Only'}
-        </button>
+        <div className="inline-flex rounded-lg overflow-hidden border border-gray-700">
+          {(['all', 'teacher', 'me'] as const).map((filter) => (
+            <button
+              key={filter}
+              onClick={() => setMessageFilter(filter)}
+              className={`text-sm px-3 py-1 transition-colors ${
+                messageFilter === filter
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+              }`}
+            >
+              {filter === 'all' ? 'All' : filter === 'teacher' ? 'Teacher' : 'Me'}
+            </button>
+          ))}
+        </div>
         <span className="text-sm text-gray-500">
           Showing {displayMessages.length} of {session.messages.length} messages
         </span>
