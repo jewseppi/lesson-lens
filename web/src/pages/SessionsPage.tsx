@@ -8,6 +8,8 @@ export default function SessionsPage() {
   const [loading, setLoading] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
 
   useEffect(() => {
     apiJson<Session[]>('/api/sessions')
@@ -43,8 +45,12 @@ export default function SessionsPage() {
   const activeSessions = sessions.filter(s => !s.is_archived);
   const archivedSessions = sessions.filter(s => s.is_archived);
 
-  // Apply text search
+  // Available months from active sessions (descending)
+  const availableMonths = [...new Set(activeSessions.map(s => s.date.slice(0, 7)))].sort().reverse();
+
+  // Filter by selected month + text search
   const searchFiltered = activeSessions.filter(s => {
+    if (selectedMonth !== 'all' && !s.date.startsWith(selectedMonth)) return false;
     if (!filter) return true;
     const q = filter.toLowerCase();
     return s.date.includes(q) || s.session_id.toLowerCase().includes(q) ||
@@ -66,19 +72,6 @@ export default function SessionsPage() {
     b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time)
   );
 
-  // Group by month
-  const groupByMonth = (list: Session[]) => {
-    const map = new Map<string, Session[]>();
-    for (const s of list) {
-      const month = s.date.slice(0, 7);
-      if (!map.has(month)) map.set(month, []);
-      map.get(month)!.push(s);
-    }
-    return map;
-  };
-
-  const groupedByMonth = groupByMonth(sorted);
-
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -89,26 +82,33 @@ export default function SessionsPage() {
         </span>
       </div>
 
-      {/* Search */}
-      <input
-        type="text"
-        placeholder="Search by date, topic..."
-        value={filter}
-        onChange={e => setFilter(e.target.value)}
-        className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
-      />
+      {/* Filters */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <select
+          value={selectedMonth}
+          onChange={e => setSelectedMonth(e.target.value)}
+          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+        >
+          {availableMonths.map(m => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+          <option value="all">All months</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Search by date, topic..."
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
+        />
+      </div>
 
-      {/* Active sessions grouped by month */}
-      {Array.from(groupedByMonth.entries()).map(([month, items]) => (
-        <div key={month}>
-          <h3 className="text-sm font-medium text-gray-500 mb-2 sticky top-0 bg-gray-950 py-1">{month}</h3>
-          <div className="space-y-2">
-            {items.map(s => (
-              <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
-            ))}
-          </div>
-        </div>
-      ))}
+      {/* Sessions */}
+      <div className="space-y-2">
+        {sorted.map(s => (
+          <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
+        ))}
+      </div>
 
       {sorted.length === 0 && (
         <p className="text-gray-500 text-sm py-4 text-center">
