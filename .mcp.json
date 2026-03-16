@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "lessonlens": {
+      "command": ".venv/bin/python",
+      "args": ["api/mcp_server.py"],
+      "env": {
+        "LESSONLENS_USER_EMAIL": ""
+      }
+    }
+  }
+}
