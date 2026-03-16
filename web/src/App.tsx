@@ -9,6 +9,8 @@ import SummaryPage from './pages/SummaryPage';
 import StudyModePage from './pages/StudyModePage';
 import UploadPage from './pages/UploadPage';
 import SettingsPage from './pages/SettingsPage';
+import SetupPage from './pages/SetupPage';
+import EvalPage from './pages/EvalPage';
 import AdminPage from './pages/AdminPage';
 import Layout from './components/Layout';
 import { FontSizeProvider } from './FontSizeContext';
@@ -33,6 +35,8 @@ function AppRoutes() {
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/setup" element={<SetupPage />} />
+        <Route path="/eval" element={<EvalPage />} />
         <Route path="/admin" element={<AdminPage />} />
         <Route path="/sessions/:sessionId" element={<SessionDetailPage />} />
         <Route path="/sessions/:sessionId/summary" element={<SummaryPage />} />

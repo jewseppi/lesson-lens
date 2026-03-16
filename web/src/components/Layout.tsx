@@ -37,6 +37,7 @@ export default function Layout() {
               <NavLink to="/" className={linkClass} end>Dashboard</NavLink>
               <NavLink to="/upload" className={linkClass}>Sync</NavLink>
               <NavLink to="/sessions" className={linkClass}>Sessions</NavLink>
+              {user?.is_admin && <NavLink to="/eval" className={linkClass}>Eval</NavLink>}
               {user?.is_admin && <NavLink to="/admin" className={linkClass}>Admin</NavLink>}
             </div>
           </div>
@@ -86,6 +87,7 @@ export default function Layout() {
                 <NavLink to="/upload" onClick={closeMobileMenu} className={linkClass}>Sync</NavLink>
                 <NavLink to="/sessions" onClick={closeMobileMenu} className={linkClass}>Sessions</NavLink>
                 <NavLink to="/settings" onClick={closeMobileMenu} className={linkClass}>Settings</NavLink>
+                {user?.is_admin && <NavLink to="/eval" onClick={closeMobileMenu} className={linkClass}>Eval</NavLink>}
                 {user?.is_admin && <NavLink to="/admin" onClick={closeMobileMenu} className={linkClass}>Admin</NavLink>}
               </div>
 

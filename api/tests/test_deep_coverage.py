@@ -366,7 +366,7 @@ class TestGeneratorConfigAndSummary:
             ),
         }), patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
             from app import _generate_summary_for_session
-            result_data, prov, mdl = _generate_summary_for_session(
+            result_data, prov, mdl, _p_action, _p_msg = _generate_summary_for_session(
                 db, user, run, session_row, {"messages": []},
             )
 

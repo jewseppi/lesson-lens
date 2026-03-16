@@ -20,7 +20,8 @@ export default function DashboardPage() {
 
   if (loading) return <div className="text-gray-400">Loading...</div>;
 
-  const recentSessions = sessions.slice(0, 5);
+  const dashboardCount = Number(localStorage.getItem('lessonlens-dashboard-count')) || 5;
+  const recentSessions = sessions.filter(s => !s.is_archived).slice(0, dashboardCount);
   const totalLessons = sessions.filter(s => s.lesson_content_count >= 3).length;
   const summarized = sessions.filter(s => s.has_summary).length;
 
@@ -52,17 +53,29 @@ export default function DashboardPage() {
         </Link>
       </div>
 
+      {/* Empty state */}
+      {sessions.length === 0 && (
+        <div className="text-center py-8 space-y-3">
+          <p className="text-gray-400">No sessions yet. Upload a chat export to get started.</p>
+          <div className="flex gap-3 justify-center">
+            <Link to="/upload" className="text-indigo-400 hover:text-indigo-300 text-sm">Upload now</Link>
+            <span className="text-gray-600">|</span>
+            <Link to="/setup" className="text-indigo-400 hover:text-indigo-300 text-sm">Setup instructions</Link>
+          </div>
+        </div>
+      )}
+
       {/* Recent sessions */}
       {recentSessions.length > 0 && (
         <div>
           <div className="flex flex-col gap-1 mb-3 sm:flex-row sm:items-baseline sm:justify-between">
             <h2 className="text-lg font-semibold">Recent Sessions</h2>
-            <p className="text-sm text-gray-500">Showing the latest 5 sessions</p>
+            <p className="text-sm text-gray-500">Showing the latest {dashboardCount} sessions</p>
           </div>
           <div className="space-y-2">
             {recentSessions.map(s => <RecentSessionCard key={s.session_id} session={s} />)}
           </div>
-          {sessions.length > 5 && (
+          {sessions.length > dashboardCount && (
             <Link to="/sessions" className="text-indigo-400 hover:text-indigo-300 text-sm mt-2 inline-block">
               View all {sessions.length} sessions →
             </Link>

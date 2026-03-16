@@ -179,7 +179,7 @@ class TestGenerateWithLocalProvider:
         }
 
         with patch("app._generate_summary_for_session") as mock_gen:
-            mock_gen.return_value = (lesson_data, "ollama", "qwen2.5:7b-instruct")
+            mock_gen.return_value = (lesson_data, "ollama", "qwen2.5:7b-instruct", "allow", None)
             r = client.post(
                 "/api/sessions/2025-01-15/generate",
                 json={"provider": "ollama"},
@@ -200,7 +200,7 @@ class TestGenerateWithLocalProvider:
         }
 
         with patch("app._generate_summary_for_session") as mock_gen:
-            mock_gen.return_value = (lesson_data, "openai_compatible_local", "local-model")
+            mock_gen.return_value = (lesson_data, "openai_compatible_local", "local-model", "allow", None)
             r = client.post(
                 "/api/sessions/2025-01-15/generate",
                 json={"provider": "openai_compatible_local"},
