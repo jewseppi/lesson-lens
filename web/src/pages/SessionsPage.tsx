@@ -3,12 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { apiJson, apiFetch } from '../api';
 import type { Session, SharedLink } from '../types';
 
-type ViewFilter = 'teacher' | 'me' | 'all';
-
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewFilter, setViewFilter] = useState<ViewFilter>('teacher');
   const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
 
@@ -46,22 +43,14 @@ export default function SessionsPage() {
   const activeSessions = sessions.filter(s => !s.is_archived);
   const archivedSessions = sessions.filter(s => s.is_archived);
 
-  // Apply view filter (only on active sessions)
-  const viewFiltered = activeSessions.filter(s => {
-    if (viewFilter === 'teacher') return s.teacher_message_count > 0;
-    if (viewFilter === 'me') return s.student_message_count > 0;
-    return true;
-  });
-
   // Apply text search
-  const searchFiltered = viewFiltered.filter(s => {
+  const searchFiltered = activeSessions.filter(s => {
     if (!filter) return true;
     const q = filter.toLowerCase();
     return s.date.includes(q) || s.session_id.toLowerCase().includes(q) ||
       s.topics.some(t => t.toLowerCase().includes(q));
   });
 
-  // Also filter archived by text search
   const archivedFiltered = archivedSessions.filter(s => {
     if (!filter) return true;
     const q = filter.toLowerCase();
@@ -95,34 +84,19 @@ export default function SessionsPage() {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Sessions</h1>
         <span className="text-sm text-gray-400">
-          {searchFiltered.length} of {activeSessions.length}
+          {searchFiltered.length} session{searchFiltered.length !== 1 ? 's' : ''}
           {archivedSessions.length > 0 && ` · ${archivedSessions.length} archived`}
         </span>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-        <input
-          type="text"
-          placeholder="Search by date, topic..."
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
-        />
-        <div className="flex bg-gray-800 rounded-lg border border-gray-700 overflow-hidden w-full sm:w-auto">
-          {([['teacher', 'Teacher'], ['me', 'Me'], ['all', 'All']] as const).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setViewFilter(key)}
-              className={`flex-1 px-4 py-2 text-sm transition-colors ${
-                viewFilter === key ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Search */}
+      <input
+        type="text"
+        placeholder="Search by date, topic..."
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
+      />
 
       {/* Active sessions grouped by month */}
       {Array.from(groupedByMonth.entries()).map(([month, items]) => (
@@ -138,7 +112,7 @@ export default function SessionsPage() {
 
       {sorted.length === 0 && (
         <p className="text-gray-500 text-sm py-4 text-center">
-          No sessions match the current filter.
+          No sessions match your search.
         </p>
       )}
 
