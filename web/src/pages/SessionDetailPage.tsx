@@ -63,7 +63,7 @@ export default function SessionDetailPage() {
       .then(data => {
         setSession(data);
         if (data.lesson_content_count === 0) {
-          setShowAll(true);
+          setMessageFilter('all');
         }
       })
       .finally(() => setLoading(false));

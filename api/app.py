@@ -3955,6 +3955,13 @@ def get_session_attachments(session_id):
         if err:
             return err
 
+        session_row = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        ).fetchone()
+        if not session_row:
+            return jsonify({"attachments": []})
+
         rows = conn.execute(
             """SELECT sa.id as sa_id, sa.match_confidence, sa.match_reason, sa.assigned_by, sa.assigned_at,
                       a.id as attachment_id, a.original_filename, a.mime_type,
@@ -3963,7 +3970,7 @@ def get_session_attachments(session_id):
                JOIN attachments a ON sa.attachment_id = a.id
                WHERE sa.session_id = ? AND sa.user_id = ?
                ORDER BY a.captured_at_local ASC""",
-            (session_id, user["id"]),
+            (session_row["id"], user["id"]),
         ).fetchall()
 
         attachments = [{
@@ -4008,7 +4015,7 @@ def assign_attachment(session_id):
 
         # Verify session belongs to user
         sess = conn.execute(
-            "SELECT session_id FROM sessions WHERE session_id = ? AND user_id = ?",
+            "SELECT id FROM sessions WHERE session_id = ? AND user_id = ?",
             (session_id, user["id"]),
         ).fetchone()
         if not sess:
@@ -4019,7 +4026,7 @@ def assign_attachment(session_id):
                 """INSERT INTO session_attachments
                    (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
                    VALUES (?, ?, ?, 'high', 'manual_assignment', 'manual')""",
-                (user["id"], session_id, attachment_id),
+                (user["id"], sess["id"], attachment_id),
             )
             conn.commit()
             return jsonify({"session_attachment_id": cursor.lastrowid}), 201
@@ -4040,9 +4047,16 @@ def unassign_attachment(session_id, attachment_id):
         if err:
             return err
 
+        sess = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        ).fetchone()
+        if not sess:
+            return jsonify({"error": "Assignment not found"}), 404
+
         result = conn.execute(
             "DELETE FROM session_attachments WHERE session_id = ? AND attachment_id = ? AND user_id = ?",
-            (session_id, attachment_id, user["id"]),
+            (sess["id"], attachment_id, user["id"]),
         )
         if result.rowcount == 0:
             return jsonify({"error": "Assignment not found"}), 404
