@@ -3,12 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { apiJson, apiFetch } from '../api';
 import type { Session, SharedLink } from '../types';
 
-type ViewFilter = 'teacher' | 'me' | 'all';
-
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewFilter, setViewFilter] = useState<ViewFilter>('teacher');
   const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
 
@@ -46,22 +43,14 @@ export default function SessionsPage() {
   const activeSessions = sessions.filter(s => !s.is_archived);
   const archivedSessions = sessions.filter(s => s.is_archived);
 
-  // Apply view filter (only on active sessions)
-  const viewFiltered = activeSessions.filter(s => {
-    if (viewFilter === 'teacher') return s.teacher_message_count > 0;
-    if (viewFilter === 'me') return s.student_message_count > 0;
-    return true;
-  });
-
   // Apply text search
-  const searchFiltered = viewFiltered.filter(s => {
+  const searchFiltered = activeSessions.filter(s => {
     if (!filter) return true;
     const q = filter.toLowerCase();
     return s.date.includes(q) || s.session_id.toLowerCase().includes(q) ||
       s.topics.some(t => t.toLowerCase().includes(q));
   });
 
-  // Also filter archived by text search
   const archivedFiltered = archivedSessions.filter(s => {
     if (!filter) return true;
     const q = filter.toLowerCase();
@@ -95,34 +84,19 @@ export default function SessionsPage() {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Sessions</h1>
         <span className="text-sm text-gray-400">
-          {searchFiltered.length} of {activeSessions.length}
+          {searchFiltered.length} session{searchFiltered.length !== 1 ? 's' : ''}
           {archivedSessions.length > 0 && ` · ${archivedSessions.length} archived`}
         </span>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-        <input
-          type="text"
-          placeholder="Search by date, topic..."
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
-          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
-        />
-        <div className="flex bg-gray-800 rounded-lg border border-gray-700 overflow-hidden w-full sm:w-auto">
-          {([['teacher', 'Teacher'], ['me', 'Me'], ['all', 'All']] as const).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setViewFilter(key)}
-              className={`flex-1 px-4 py-2 text-sm transition-colors ${
-                viewFilter === key ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Search */}
+      <input
+        type="text"
+        placeholder="Search by date, topic..."
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 w-full sm:w-64"
+      />
 
       {/* Active sessions grouped by month */}
       {Array.from(groupedByMonth.entries()).map(([month, items]) => (
@@ -138,7 +112,7 @@ export default function SessionsPage() {
 
       {sorted.length === 0 && (
         <p className="text-gray-500 text-sm py-4 text-center">
-          No sessions match the current filter.
+          No sessions match your search.
         </p>
       )}
 
@@ -195,50 +169,44 @@ function SessionCard({ session: s, onArchive }: { session: Session; onArchive: (
             </div>
           )}
         </div>
-        <div className="flex items-start gap-3">
-          <div className="text-sm sm:text-right">
-            <div className="flex gap-3 sm:justify-end">
-              {s.teacher_message_count > 0 && (
-                <span>
-                  <span className="text-pink-400 font-medium">{s.teacher_message_count}</span>
-                  <span className="text-gray-500"> teacher</span>
-                </span>
-              )}
-              {s.student_message_count > 0 && (
-                <span>
-                  <span className="text-cyan-400 font-medium">{s.student_message_count}</span>
-                  <span className="text-gray-500"> me</span>
-                </span>
-              )}
-            </div>
-            <div className="text-gray-500">{s.message_count} total</div>
-            {s.has_summary && (
-              <Link
-                to={`/sessions/${s.session_id}/summary`}
-                onClick={e => e.stopPropagation()}
-                className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs hover:bg-green-800 transition-colors"
-              >
-                Summary
-              </Link>
+        <div className="text-sm sm:text-right">
+          <div className="flex gap-3 sm:justify-end">
+            {s.teacher_message_count > 0 && (
+              <span>
+                <span className="text-pink-400 font-medium">{s.teacher_message_count}</span>
+                <span className="text-gray-500"> teacher</span>
+              </span>
             )}
-            {s.needs_summary && (
-              <Link
-                to={`/sessions/${s.session_id}/summary`}
-                onClick={e => e.stopPropagation()}
-                className="inline-flex items-center gap-1 mt-1 bg-amber-900/60 text-amber-400 px-2 py-0.5 rounded text-xs hover:bg-amber-900 transition-colors"
-                title="No summary yet — click to generate"
-              >
-                <span className="opacity-70">&#x26A0;</span> Generate
-              </Link>
+            {s.student_message_count > 0 && (
+              <span>
+                <span className="text-cyan-400 font-medium">{s.student_message_count}</span>
+                <span className="text-gray-500"> me</span>
+              </span>
             )}
           </div>
-          <button
-            onClick={(e) => onArchive(s.session_id, e)}
-            className="shrink-0 p-1 text-gray-600 hover:text-gray-300 transition-colors"
-            title={s.is_archived ? 'Unarchive' : 'Archive'}
-          >
-            {s.is_archived ? '↩' : '📦'}
-          </button>
+          <div className="text-gray-500">{s.message_count} total</div>
+          {s.has_summary && (
+            <Link
+              to={`/sessions/${s.session_id}/summary`}
+              onClick={e => e.stopPropagation()}
+              className="inline-block mt-1 bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs hover:bg-green-800 transition-colors"
+            >
+              Summary
+            </Link>
+          )}
+          {s.needs_summary && !s.has_summary && (
+            <span className="inline-block mt-1 text-gray-600 text-xs">No summary</span>
+          )}
+          {/* Unarchive button only shown in archived section */}
+          {s.is_archived && (
+            <button
+              onClick={(e) => onArchive(s.session_id, e)}
+              className="mt-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              title="Unarchive"
+            >
+              ↩ Unarchive
+            </button>
+          )}
         </div>
       </div>
 

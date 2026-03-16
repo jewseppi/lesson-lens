@@ -253,6 +253,22 @@ def get_session(session_id: str, include_messages: bool = True, max_messages: in
         if topics:
             out.append(f"Topics: {', '.join(topics)}")
 
+        # Attachments
+        if row:
+            att_rows = conn.execute(
+                """SELECT a.original_filename, a.stored_filename, a.mime_type, sa.match_confidence
+                   FROM session_attachments sa
+                   JOIN attachments a ON sa.attachment_id = a.id
+                   WHERE sa.session_id = ? AND sa.user_id = ?
+                   ORDER BY a.id""",
+                (row["id"], user["id"]),
+            ).fetchall()
+            if att_rows:
+                out.append(f"\nAttachments: {len(att_rows)}")
+                for a in att_rows:
+                    att_path = os.path.join(_PROJECT_ROOT, "attachments", a["stored_filename"])
+                    out.append(f"  - {a['original_filename']} ({a['mime_type']}, {a['match_confidence']}) path: {att_path}")
+
         if include_messages:
             messages = session_data.get("messages", [])
             out.append(f"\n--- Transcript ({len(messages)} messages) ---")
@@ -495,6 +511,74 @@ def generate_summary(session_id: str, provider: str = "", model: str = "") -> st
             result += f"\n  Warning: {policy_msg}"
         result += "\nUse get_session_summary to view the full summary."
         return result
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def store_summary(session_id: str, lesson_data_json: str, provider: str = "claude-agent", model: str = "") -> str:
+    """Store an agent-generated lesson summary directly into the database.
+
+    Use this when you (the AI agent) have analyzed the session transcript and
+    attached images yourself and produced the lesson-data.v1 JSON. This bypasses
+    the need for external LLM API keys.
+
+    The lesson_data_json must follow the lesson-data.v1 schema with these top-level keys:
+    schema_version, lesson_id, lesson_date, title, source_session_ids, language_mode,
+    summary, key_sentences, vocabulary, corrections, review, generation_meta.
+
+    Args:
+        session_id: The session to store the summary for.
+        lesson_data_json: The full lesson-data.v1 JSON string.
+        provider: Provider name for metadata. Default "claude-agent".
+        model: Model name for metadata. Default empty (auto-detected).
+    """
+    conn = get_db()
+    try:
+        user, err = _get_user(conn)
+        if err:
+            return f"Error: {err}"
+        run, err = _require_run(conn, user["id"])
+        if err:
+            return f"Error: {err}"
+
+        session_row = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        ).fetchone()
+        if not session_row:
+            return f"Error: Session '{session_id}' not found."
+
+        try:
+            lesson_data = json.loads(lesson_data_json)
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid JSON — {e}"
+
+        # Validate required keys
+        required = {"schema_version", "lesson_id", "lesson_date", "title", "vocabulary", "key_sentences", "summary"}
+        missing = required - set(lesson_data.keys())
+        if missing:
+            return f"Error: Missing required keys: {', '.join(sorted(missing))}"
+
+        use_model = model or lesson_data.get("generation_meta", {}).get("model", "agent")
+
+        _store_lesson_summary(
+            conn, session_row, run, user["id"],
+            provider, use_model, lesson_data, None,
+        )
+
+        # Index retrieval items for future context
+        _index_retrieval_items(conn, user["id"], session_id, lesson_data)
+        conn.commit()
+
+        vocab_count = len(lesson_data.get("vocabulary", []))
+        sent_count = len(lesson_data.get("key_sentences", []))
+        return (
+            f"Summary stored for {session_id} via {provider}/{use_model}.\n"
+            f"  Vocabulary: {vocab_count} items\n"
+            f"  Key sentences: {sent_count}\n"
+            "Use get_session_summary to view it."
+        )
     finally:
         conn.close()
 
