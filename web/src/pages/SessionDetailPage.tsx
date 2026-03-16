@@ -592,7 +592,7 @@ function AttachmentPanel({ attachments, onRemove }: {
         {attachments.map(att => (
           <div key={att.attachment_id} className="relative group">
             <img
-              src={`${API_BASE}/api/attachments/${att.attachment_id}/image`}
+              src={`${API_BASE}/api/attachments/${att.attachment_id}/image?token=${localStorage.getItem('token') || ''}`}
               alt={att.original_filename}
               className="w-full h-32 object-cover rounded-lg border border-gray-700"
               loading="lazy"

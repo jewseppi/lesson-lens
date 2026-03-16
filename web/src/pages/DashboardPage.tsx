@@ -22,7 +22,7 @@ export default function DashboardPage() {
 
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const recentSessions = sessions
-    .filter(s => !s.is_archived && s.date >= twoWeeksAgo)
+    .filter(s => !s.is_archived && s.date >= twoWeeksAgo && s.topics.length > 0)
     .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time));
   const totalLessons = sessions.filter(s => s.lesson_content_count >= 3).length;
   const summarized = sessions.filter(s => s.has_summary).length;
