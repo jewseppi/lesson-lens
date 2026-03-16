@@ -107,6 +107,46 @@ export default function SetupPage() {
       <section className="space-y-3">
         <h2 className="text-lg font-semibold flex items-center gap-2">
           <span className="bg-indigo-600 text-white w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold">5</span>
+          Optional: MCP Server for AI Agents
+        </h2>
+        <p className="text-sm text-gray-400">
+          Connect Claude Code or Cursor directly to LessonLens via MCP (Model Context Protocol).
+          Agents get native tools like <code className="text-gray-300">list_sessions</code>,{' '}
+          <code className="text-gray-300">generate_summary</code>, and{' '}
+          <code className="text-gray-300">add_annotation</code> without needing to know the REST API.
+        </p>
+        <CopyBlock
+          label="Install MCP dependency"
+          text="pip install mcp"
+        />
+        <p className="text-sm text-gray-400">
+          The project includes a <code className="text-gray-300">.mcp.json</code> config file.
+          Set your email in the env to connect:
+        </p>
+        <CopyBlock
+          label=".mcp.json (already in project root)"
+          text={`{
+  "mcpServers": {
+    "lessonlens": {
+      "command": ".venv/bin/python",
+      "args": ["api/mcp_server.py"],
+      "env": {
+        "LESSONLENS_USER_EMAIL": "your-email@example.com"
+      }
+    }
+  }
+}`}
+        />
+        <p className="text-sm text-gray-500">
+          13 tools available: session listing, summaries, annotations, AI reviews, retrieval context, and more.
+          Claude Code auto-discovers the server from the project config.
+        </p>
+      </section>
+
+      {/* Step 6 */}
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          <span className="bg-indigo-600 text-white w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold">6</span>
           Upload your first chat export
         </h2>
         <p className="text-sm text-gray-400">
