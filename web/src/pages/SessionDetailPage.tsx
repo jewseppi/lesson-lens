@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { apiJson, apiFetch } from '../api';
 import { useFontSize } from '../FontSizeContext';
 import type { SessionDetail, Message, SharedLink, SessionAttachment, Annotation, AIReview, AIReviewFinding } from '../types';
@@ -40,6 +40,7 @@ function CopyButton({ text }: { text: string }) {
 
 export default function SessionDetailPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [messageFilter, setMessageFilter] = useState<'all' | 'teacher' | 'me'>('all');
@@ -103,6 +104,15 @@ export default function SessionDetailPage() {
     } finally {
       setReviewLoading(false);
     }
+  };
+
+  const handleDelete = async () => {
+    if (!sessionId) return;
+    if (!confirm(`Are you sure you want to delete this session (${session?.date})? This cannot be undone.`)) return;
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      if (res.ok) navigate('/sessions');
+    } catch { /* ignore */ }
   };
 
   const handleFindingAction = async (findingIdx: number, action: 'accept' | 'dismiss') => {
@@ -185,6 +195,12 @@ export default function SessionDetailPage() {
               return `curl -X POST http://localhost:5001/api/sessions/${sessionId}/review \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${token}" \\\n  -d '${JSON.stringify(body)}'`;
             })()} />
           </div>
+          <button
+            onClick={handleDelete}
+            className="text-xs text-gray-600 hover:text-red-400 transition-colors"
+          >
+            Delete session
+          </button>
         </div>
       </div>
 
@@ -592,7 +608,7 @@ function AttachmentPanel({ attachments, onRemove }: {
         {attachments.map(att => (
           <div key={att.attachment_id} className="relative group">
             <img
-              src={`${API_BASE}/api/attachments/${att.attachment_id}/image`}
+              src={`${API_BASE}/api/attachments/${att.attachment_id}/image?token=${localStorage.getItem('token') || ''}`}
               alt={att.original_filename}
               className="w-full h-32 object-cover rounded-lg border border-gray-700"
               loading="lazy"

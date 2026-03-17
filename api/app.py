@@ -1813,7 +1813,19 @@ def import_backup():
                 ),
             )
 
+            # Fetch existing session_ids for this user to avoid duplicates on re-import
+            existing_ids = {
+                row["session_id"]
+                for row in conn.execute(
+                    "SELECT session_id FROM sessions WHERE user_id = ?",
+                    (user["id"],),
+                ).fetchall()
+            }
+
+            inserted = 0
             for session in new_sessions:
+                if session["session_id"] in existing_ids:
+                    continue  # skip duplicate
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, user_id, session_id, date, start_time, end_time,
@@ -1835,6 +1847,7 @@ def import_backup():
                         json.dumps(session.get("topics", []), ensure_ascii=False),
                     ),
                 )
+                inserted += 1
             conn.commit()
 
             import sys as _sys
@@ -2088,11 +2101,22 @@ def parse_upload(upload_id):
              output_dir, datetime.now(timezone.utc).isoformat()),
         )
 
-        # Insert session records (skip empty sessions)
+        # Fetch existing session_ids for this user to avoid duplicates on re-import
+        existing_ids = {
+            row["session_id"]
+            for row in conn.execute(
+                "SELECT session_id FROM sessions WHERE user_id = ?",
+                (user["id"],),
+            ).fetchall()
+        }
+
+        # Insert session records (skip empty sessions and duplicates)
         inserted_sessions = 0
         for sess in result["sessions"]:
             if sess["message_count"] == 0:
                 continue
+            if sess["session_id"] in existing_ids:
+                continue  # skip duplicate
             conn.execute(
                 """INSERT INTO sessions
                    (run_id, user_id, session_id, date, start_time, end_time,
@@ -3918,11 +3942,69 @@ def list_attachments():
         conn.close()
 
 
-@app.route("/api/attachments/<int:attachment_id>/image", methods=["GET"])
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
 @jwt_required()
-def serve_attachment_image(attachment_id):
-    """Serve an attachment image file (user-scoped)."""
+def delete_session(session_id):
+    """Delete a session and its associated data."""
     email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No completed parse run"}), 404
+
+        sess = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ? AND run_id = ?",
+            (session_id, run["id"]),
+        ).fetchone()
+        if not sess:
+            return jsonify({"error": "Session not found"}), 404
+
+        sess_int_id = sess["id"]
+        conn.execute("DELETE FROM session_attachments WHERE session_id = ?", (sess_int_id,))
+        conn.execute(
+            "DELETE FROM user_retrieval_items WHERE user_id = ? AND session_id = ?",
+            (user["id"], session_id),
+        )
+        conn.execute(
+            "DELETE FROM lesson_summaries WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM annotations WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute("DELETE FROM sessions WHERE id = ?", (sess_int_id,))
+        conn.commit()
+        return jsonify({"deleted": True})
+    finally:
+        conn.close()
+
+
+@app.route("/api/attachments/<int:attachment_id>/image", methods=["GET"])
+@jwt_required(optional=True)
+def serve_attachment_image(attachment_id):
+    """Serve an attachment image file (user-scoped).
+    Accepts JWT via Authorization header or ?token= query param (for <img src>).
+    """
+    email = get_jwt_identity()
+    if not email:
+        # Fall back to query param token for <img src> tags
+        from flask import request as _req
+        token = _req.args.get("token")
+        if token:
+            try:
+                from flask_jwt_extended import decode_token
+                decoded = decode_token(token)
+                email = decoded.get("sub")
+            except Exception:
+                return jsonify({"error": "Invalid token"}), 401
+    if not email:
+        return jsonify({"error": "Authentication required"}), 401
     conn = get_db()
     try:
         user, err = _require_active_user(conn, email)

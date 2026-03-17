@@ -20,11 +20,9 @@ export default function DashboardPage() {
 
   if (loading) return <div className="text-gray-400">Loading...</div>;
 
-  const now = new Date();
-  const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate())
-    .toISOString().slice(0, 10);
+  const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const recentSessions = sessions
-    .filter(s => !s.is_archived && s.date >= oneMonthAgo)
+    .filter(s => !s.is_archived && s.date >= twoWeeksAgo)
     .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time));
   const totalLessons = sessions.filter(s => s.lesson_content_count >= 3).length;
   const summarized = sessions.filter(s => s.has_summary).length;
@@ -72,10 +70,7 @@ export default function DashboardPage() {
       {/* Recent sessions */}
       {recentSessions.length > 0 && (
         <div>
-          <div className="flex flex-col gap-1 mb-3 sm:flex-row sm:items-baseline sm:justify-between">
-            <h2 className="text-lg font-semibold">Past Month</h2>
-            <p className="text-sm text-gray-500">{recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''}</p>
-          </div>
+          <p className="text-sm text-gray-500 mb-3">{recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''}</p>
           <div className="space-y-2">
             {recentSessions.map(s => <RecentSessionCard key={s.session_id} session={s} />)}
           </div>
