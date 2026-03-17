@@ -1813,7 +1813,19 @@ def import_backup():
                 ),
             )
 
+            # Fetch existing session_ids for this user to avoid duplicates on re-import
+            existing_ids = {
+                row["session_id"]
+                for row in conn.execute(
+                    "SELECT session_id FROM sessions WHERE user_id = ?",
+                    (user["id"],),
+                ).fetchall()
+            }
+
+            inserted = 0
             for session in new_sessions:
+                if session["session_id"] in existing_ids:
+                    continue  # skip duplicate
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, user_id, session_id, date, start_time, end_time,
@@ -1835,6 +1847,7 @@ def import_backup():
                         json.dumps(session.get("topics", []), ensure_ascii=False),
                     ),
                 )
+                inserted += 1
             conn.commit()
 
             import sys as _sys
@@ -2088,11 +2101,22 @@ def parse_upload(upload_id):
              output_dir, datetime.now(timezone.utc).isoformat()),
         )
 
-        # Insert session records (skip empty sessions)
+        # Fetch existing session_ids for this user to avoid duplicates on re-import
+        existing_ids = {
+            row["session_id"]
+            for row in conn.execute(
+                "SELECT session_id FROM sessions WHERE user_id = ?",
+                (user["id"],),
+            ).fetchall()
+        }
+
+        # Insert session records (skip empty sessions and duplicates)
         inserted_sessions = 0
         for sess in result["sessions"]:
             if sess["message_count"] == 0:
                 continue
+            if sess["session_id"] in existing_ids:
+                continue  # skip duplicate
             conn.execute(
                 """INSERT INTO sessions
                    (run_id, user_id, session_id, date, start_time, end_time,
