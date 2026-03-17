@@ -30,16 +30,6 @@ export default function SessionsPage() {
     } catch { /* ignore */ }
   };
 
-  const deleteSession = async (sessionId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm(`Delete session ${sessionId}? This cannot be undone.`)) return;
-    try {
-      const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setSessions(prev => prev.filter(s => s.session_id !== sessionId));
-      }
-    } catch { /* ignore */ }
-  };
 
   if (loading) return <div className="text-gray-400">Loading sessions...</div>;
   if (sessions.length === 0) {
@@ -117,7 +107,7 @@ export default function SessionsPage() {
       {/* Sessions */}
       <div className="space-y-2">
         {sorted.map(s => (
-          <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} onDelete={deleteSession} />
+          <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
         ))}
       </div>
 
@@ -141,7 +131,7 @@ export default function SessionsPage() {
           {showArchived && (
             <div className="space-y-2 mt-3">
               {archivedSorted.map(s => (
-                <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} onDelete={deleteSession} />
+                <SessionCard key={s.session_id} session={s} onArchive={toggleArchive} />
               ))}
               {archivedFiltered.length === 0 && (
                 <p className="text-gray-600 text-sm">No archived sessions match your search.</p>
@@ -154,13 +144,11 @@ export default function SessionsPage() {
   );
 }
 
-function SessionCard({ session: s, onArchive, onDelete }: {
+function SessionCard({ session: s, onArchive }: {
   session: Session;
   onArchive: (id: string, e: React.MouseEvent) => void;
-  onDelete?: (id: string, e: React.MouseEvent) => void;
 }) {
   const navigate = useNavigate();
-  const isNonLesson = s.topics.length === 0 && !s.has_summary;
 
   return (
     <div
@@ -168,20 +156,13 @@ function SessionCard({ session: s, onArchive, onDelete }: {
       className={`bg-gray-900 border rounded-lg p-4 transition-colors cursor-pointer ${
         s.is_archived
           ? 'border-gray-800/50 opacity-70 hover:opacity-100 hover:border-gray-600'
-          : isNonLesson
-            ? 'border-yellow-900/50 hover:border-yellow-700'
-            : 'border-gray-800 hover:border-indigo-600'
+          : 'border-gray-800 hover:border-indigo-600'
       }`}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-start">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-medium">{s.date}</span>
-            {isNonLesson && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-900/50 text-yellow-400 border border-yellow-800/50">
-                No lesson content
-              </span>
-            )}
           </div>
           <div className="text-sm text-gray-400">{s.start_time}–{s.end_time}</div>
           {s.topics.length > 0 && (
@@ -219,17 +200,8 @@ function SessionCard({ session: s, onArchive, onDelete }: {
               Summary
             </Link>
           )}
-          {s.needs_summary && !s.has_summary && !isNonLesson && (
+          {s.needs_summary && !s.has_summary && (
             <span className="inline-block mt-1 text-gray-600 text-xs">No summary</span>
-          )}
-          {isNonLesson && onDelete && (
-            <button
-              onClick={(e) => onDelete(s.session_id, e)}
-              className="mt-1 text-xs text-red-500 hover:text-red-300 transition-colors"
-              title="Delete session"
-            >
-              Delete
-            </button>
           )}
           {s.is_archived && (
             <button

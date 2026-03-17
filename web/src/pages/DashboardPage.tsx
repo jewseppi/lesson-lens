@@ -22,7 +22,7 @@ export default function DashboardPage() {
 
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const recentSessions = sessions
-    .filter(s => !s.is_archived && s.date >= twoWeeksAgo && s.topics.length > 0)
+    .filter(s => !s.is_archived && s.date >= twoWeeksAgo)
     .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time));
   const totalLessons = sessions.filter(s => s.lesson_content_count >= 3).length;
   const summarized = sessions.filter(s => s.has_summary).length;
@@ -70,7 +70,7 @@ export default function DashboardPage() {
       {/* Recent sessions */}
       {recentSessions.length > 0 && (
         <div>
-          <p className="text-sm text-gray-500 mb-3">{recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''} in the past 2 weeks</p>
+          <p className="text-sm text-gray-500 mb-3">{recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''}</p>
           <div className="space-y-2">
             {recentSessions.map(s => <RecentSessionCard key={s.session_id} session={s} />)}
           </div>
