@@ -42,9 +42,15 @@ outputs:
 # LLM provider (manual selection per run)
 generation:
   default_provider: "openai"
-  default_model: "gpt-4o"
+  default_model: "gpt-5.6"
   temperature: 0.3
   prompt_version: "v1"
+  # Per-provider default models (used when a provider is selected without an
+  # explicit --model override). Refresh these as new models ship.
+  provider_models:
+    openai: "gpt-5.6"
+    anthropic: "claude-opus-5"
+    gemini: "gemini-3.6-flash"
 
 # Local provider defaults (used when provider is ollama or openai_compatible_local)
 local:

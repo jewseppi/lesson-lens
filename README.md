@@ -3,6 +3,38 @@
 Turns exported LINE/chat lesson transcripts into structured study packages:
 lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 
+## One-touch update from your Mac
+
+If you take lessons over LINE on a Mac, `make update` is the fast path to keep
+your hosted LessonLens in sync:
+
+```bash
+# 1) One-time: copy .env.example to .env and set the hosted-server vars
+#    LESSONLENS_API_URL / LESSONLENS_EMAIL / LESSONLENS_PASSWORD
+# 2) In LINE, export the chat (right-click the chat → export) — this is the one
+#    manual step macOS LINE can't automate.
+# 3) Then, whenever you want to refresh:
+make update            # sync newest export + any new images, generate latest lesson
+make update-dry        # preview what would sync (no network, no changes)
+make update-sync-only  # sync but skip generation
+```
+
+`make update` runs `scripts/line_mac_sync.py`, which finds the newest LINE
+export, scans LINE's on-disk media cache for images you haven't synced yet
+(deduped by content hash, so re-runs are cheap and idempotent), uploads both to
+your hosted server, and generates the newest session. If the encrypted cache
+doesn't yield usable images on your machine, point it at a folder where you save
+images instead:
+
+```bash
+python scripts/line_mac_sync.py --images-dir ~/Pictures/line-lessons
+```
+
+Prefer clicking to typing? Double-click **`update.command`** in Finder (run
+`chmod +x update.command` once). See
+[docs/APP_REVIEW_2026.md](docs/APP_REVIEW_2026.md) for the design and the wider
+review of the app's state and gaps.
+
 ## Agent Bridge
 
 If you want the repo to take a LINE export file path and run the full local workflow,
@@ -110,20 +142,24 @@ Important constraint:
 ## Quick Start
 
 ```bash
-# Parse an export file into structured sessions
+# Run everything end-to-end (parse → validate → generate → quality-check)
+python scripts/run_all.py --input raw-exports/DOC-20260307-WA0006 --run-id 2026-03-07_01
+
+# ...or run the stages individually:
+
+# Parse an export file into structured sessions → processed/<run-id>/sessions.json
 python scripts/parse_line_export.py --input raw-exports/DOC-20260307-WA0006 --run-id 2026-03-07_01
 
 # Validate parser output
-python scripts/validate_sessions.py --run-id 2026-03-07_01
+python scripts/validate_sessions.py --input processed/2026-03-07_01/sessions.json
 
-# Generate lesson package (summary, flashcards, HTML)
-python scripts/generate_outputs.py --run-id 2026-03-07_01 --session 2024-01-16
+# Generate lesson package (summary, flashcards, HTML) → summaries/<run-id>/<session>/
+python scripts/generate_outputs.py --sessions processed/2026-03-07_01/sessions.json \
+    --session-id 2024-01-16 --run-id 2026-03-07_01
 
-# Run quality checks
-python scripts/quality_check.py --run-id 2026-03-07_01 --session 2024-01-16
-
-# Or run everything end-to-end
-python scripts/run_all.py --input raw-exports/DOC-20260307-WA0006 --run-id 2026-03-07_01
+# Run quality checks against the generated package
+python scripts/quality_check.py --input summaries/2026-03-07_01/2024-01-16/lesson-data.json \
+    --sessions processed/2026-03-07_01/sessions.json
 ```
 
 ## Commands
@@ -137,8 +173,11 @@ python scripts/run_all.py --input raw-exports/DOC-20260307-WA0006 --run-id 2026-
 | `install_manual_summary.py` | Install a manual `lesson-data.json` into app assets + SQLite |
 | `quality_check.py`     | Check correction coverage, pinyin completeness, source refs       |
 | `run_all.py`           | Full pipeline: parse → validate → generate → quality-check        |
+| `line_mac_sync.py`     | macOS one-touch updater: sync newest LINE export + new images to the hosted app, then generate (`make update`) |
 
-All commands accept `--input`, `--run-id`, and `--config` flags.
+The pipeline scripts accept `--input`/`--sessions`, `--run-id`, and `--config`
+flags (see each command's `--help`). `line_mac_sync.py` targets the hosted
+server via `LESSONLENS_API_URL` / `LESSONLENS_EMAIL` / `LESSONLENS_PASSWORD`.
 
 ## Project Structure
 

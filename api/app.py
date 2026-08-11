@@ -236,7 +236,11 @@ def _load_generator_config(provider_override=None, model_override=None):
     elif use_provider == "openai_compatible_local":
         use_model = os.environ.get("LOCAL_OAI_MODEL") or local_defaults.get("openai_compatible_local_model", "local-model")
     else:
-        use_model = gen_defaults.get("default_model", "gpt-4o")
+        provider_models = gen_defaults.get("provider_models", {})
+        use_model = (
+            provider_models.get(use_provider)
+            or gen_defaults.get("default_model", "gpt-5.6")
+        )
 
     temperature = gen_defaults.get("temperature", 0.3)
 

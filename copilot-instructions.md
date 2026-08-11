@@ -52,3 +52,19 @@ Environment requirements for generation:
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` for Gemini
 
 If the user asks for a summary from a newly provided file, do not tell them to run CLI scripts manually. Use the bridge script.
+
+## One-touch hosted update (macOS)
+
+When the user just wants to "update" from their Mac after a LINE lesson — pull
+the latest chat and images into the **hosted** app in one step — prefer the
+one-touch updater over the agent bridge (which targets a local test DB):
+
+```bash
+make update            # or: python scripts/line_mac_sync.py
+```
+
+It reads `LESSONLENS_API_URL` / `LESSONLENS_EMAIL` / `LESSONLENS_PASSWORD`
+(env or repo `.env`), finds the newest LINE export, scans LINE's media cache for
+new images, uploads both, and generates the latest session. Use
+`--images-dir <folder>` if the cache scan yields nothing, `--dry-run` to
+preview, and `--sync-only` to skip generation.

@@ -13,9 +13,9 @@ const REMOTE_EMAIL_KEY = 'lessonlens-remote-email';
 const SETTINGS_TAB_KEY = 'lessonlens-settings-tab';
 
 const CLOUD_MODEL_DEFAULTS: Record<string, string> = {
-  openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-20250514',
-  gemini: 'gemini-2.0-flash',
+  openai: 'gpt-5.6',
+  anthropic: 'claude-opus-5',
+  gemini: 'gemini-3.6-flash',
 };
 
 function getStoredModel(provider: Provider): string {

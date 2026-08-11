@@ -151,8 +151,8 @@ def lesson_template(session: dict) -> dict:
             "flashcards_csv_path": "flashcards.csv",
         },
         "generation_meta": {
-            "provider": "copilot-agent",
-            "model": "GPT-5.4",
+            "provider": "manual-agent",
+            "model": "manual-agent",
             "prompt_version": "v1-manual-agent",
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "run_id": "manual-agent",
