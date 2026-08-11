@@ -31,9 +31,19 @@ python scripts/line_mac_sync.py --images-dir ~/Pictures/line-lessons
 ```
 
 Prefer clicking to typing? Double-click **`update.command`** in Finder (run
-`chmod +x update.command` once). See
-[docs/APP_REVIEW_2026.md](docs/APP_REVIEW_2026.md) for the design and the wider
-review of the app's state and gaps.
+`chmod +x update.command` once).
+
+To backfill older lessons after a model upgrade, `make update-all` syncs and
+then generates every session still missing a summary (idempotent — it never
+re-generates ones you already have). To make the update run on its own,
+`make schedule` installs a `launchd` job (daily at 20:00 by default;
+`bash scripts/launchd/install.sh --hour 7` to change it, `make unschedule` to
+remove it). The one step it can't automate is the LINE export itself — macOS
+LINE has no scripting hook — but a scheduled run harmlessly no-ops until there's
+a new export to pick up.
+
+See [docs/APP_REVIEW_2026.md](docs/APP_REVIEW_2026.md) for the design and the
+wider review of the app's state and gaps.
 
 ## Agent Bridge
 

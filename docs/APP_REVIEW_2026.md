@@ -113,13 +113,20 @@ the updater at a folder where you save images instead, and the rest of the flow
 is unchanged. This is a deliberate design choice — a reliable folder-watch
 fallback over a brittle attempt to decrypt LINE's DB.
 
+## Automation added (this branch)
+
+- **Backlog fill on Opus 5**: `make update-all` syncs and then generates every
+  session still missing a summary — idempotent, so it never re-generates ones
+  you already have. Use it to bring older lessons up to the stronger model
+  (spot-check a couple first).
+- **Scheduled runs**: `make schedule` installs a `launchd` job
+  (`scripts/launchd/`, daily at 20:00 by default;
+  `install.sh --hour N` to change, `make unschedule` to remove). It runs the
+  gap-filling update, so a run with no new export is a cheap no-op. The one step
+  that can't be automated is the LINE export itself (no macOS scripting hook).
+
 ## Suggested next steps (not in this branch)
 
-- **Server-side generation on Opus 5 for the whole backlog**: `make update
-  --generate-all` (or the Settings bulk action) to re-summarize older sessions
-  now that the model is much stronger — worth spot-checking a couple first.
-- **Schedule the updater**: a `launchd` agent (or a cron on the Mac) to run
-  `line_mac_sync.py` after you export, so even the run is automatic.
 - **Image relevance filtering**: LINE's cache holds stickers and UI chrome too;
   a lightweight size/aspect heuristic (or a vision pass) before upload would cut
   noise in attachments.

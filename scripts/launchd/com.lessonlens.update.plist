@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a macOS launchd job that runs the LessonLens updater on a
+  schedule. Do not edit/copy this by hand: run "make schedule" (or
+  "bash scripts/launchd/install.sh"), which substitutes __REPO__, __PYTHON__,
+  and __HOUR__ and installs it to ~/Library/LaunchAgents.
+
+  The job runs line_mac_sync.py in generate-all mode, which is idempotent: sync
+  dedupes by content hash and generation only fills sessions that still lack a
+  summary, so a run with nothing new is a cheap no-op and never re-bills work.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lessonlens.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "__REPO__" &amp;&amp; __PYTHON__ scripts/line_mac_sync.py --generate-all</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>__HOUR__</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__REPO__/logs/update.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/logs/update.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -40,6 +40,10 @@ web/dist/
 .env
 .env.local
 
+# Local updater state / logs
+logs/
+.lessonlens/
+
 # Test artifacts
 .coverage
 coverage.xml
