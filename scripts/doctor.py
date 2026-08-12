@@ -161,7 +161,26 @@ def check_mcp(report: Report, cfg):
             FAIL,
             "Hosted MCP server",
             "the `mcp` package is not installed",
-            "pip install mcp   (then point your agent at the lessonlens-hosted entry in .mcp.json)",
+            "pip install 'mcp>=1.2,<2'   (then point your agent at the "
+            "lessonlens-hosted entry in .mcp.json)",
+        )
+        return
+
+    # mcp 2.x dropped mcp.server.fastmcp, which both servers are built on. Catch
+    # the version explicitly so this reads as a pin problem, not a mystery.
+    try:
+        import importlib.metadata as _md
+
+        version = _md.version("mcp")
+    except Exception:
+        version = "unknown"
+    if version != "unknown" and version.split(".")[0].isdigit() and int(version.split(".")[0]) >= 2:
+        report.add(
+            FAIL,
+            "Hosted MCP server",
+            f"mcp {version} is installed, but 2.x removed mcp.server.fastmcp",
+            "pip install 'mcp>=1.2,<2'   (api/requirements.txt pins this; an old "
+            "environment resolved with `mcp>=1.0` will have picked up 2.x)",
         )
         return
 
@@ -189,8 +208,22 @@ def check_mcp(report: Report, cfg):
     report.add(
         OK,
         "Hosted MCP server",
-        "imports cleanly and is configured — your agent can read/write the hosted app",
+        f"imports cleanly (mcp {version}) — your agent can read/write the hosted app",
     )
+
+    # Both servers expose 9 identically-named tools, store_summary among them. If
+    # the local one is also active, an agent can write a summary to the local
+    # SQLite instead of the hosted app and nobody notices.
+    if os.environ.get("LESSONLENS_USER_EMAIL"):
+        report.add(
+            WARN,
+            "MCP server ambiguity",
+            "LESSONLENS_USER_EMAIL is set, so the LOCAL server (lessonlens) is "
+            "configured too; it shares 9 tool names with lessonlens-hosted",
+            "Prefer the lessonlens-hosted tools. Unset LESSONLENS_USER_EMAIL, or "
+            "remove the `lessonlens` entry from .mcp.json, to remove the ambiguity.",
+            required=False,
+        )
 
 
 def check_agent_command(report: Report, cfg, pending, run_probe: bool):

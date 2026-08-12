@@ -69,6 +69,20 @@ new images, uploads both, and generates the latest session. Use
 `--images-dir <folder>` if the cache scan yields nothing, `--dry-run` to
 preview, and `--sync-only` to skip generation.
 
+## Which MCP server to use (read this first)
+
+Two servers are configured and **9 of their tool names are identical** —
+including `store_summary`. Picking the wrong one silently writes to the wrong
+database.
+
+| Server | Writes to | Use when |
+| --- | --- | --- |
+| **`lessonlens-hosted`** | the hosted app over HTTP | **Default. Use this unless told otherwise.** |
+| `lessonlens` | a local SQLite file | Only when the user explicitly says they are working locally/offline |
+
+If both are available and the user hasn't said which, use **`lessonlens-hosted`**
+and say so in your first message, so a wrong assumption is visible immediately.
+
 ## Generating summaries yourself (preferred — no API key)
 
 When the user asks you to summarize lessons, do the work yourself through the

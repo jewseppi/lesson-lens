@@ -6,4 +6,7 @@ openai>=2.26
 anthropic>=0.84
 google-generativeai>=0.8
 Pillow>=10.0
-mcp>=1.0
+# Both MCP servers use `from mcp.server.fastmcp import FastMCP`, which mcp 2.x
+# removed. An unbounded `mcp>=1.0` resolves to 2.x today and breaks both with
+# ModuleNotFoundError: No module named 'mcp.server.fastmcp'.
+mcp>=1.2,<2

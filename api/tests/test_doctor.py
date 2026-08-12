@@ -180,6 +180,41 @@ def test_probe_runs_the_command(monkeypatch):
     assert _find(report, "Agent probe")[0] == doctor.OK
 
 
+def test_mcp2_is_reported_as_a_pin_problem(monkeypatch):
+    """mcp 2.x removed mcp.server.fastmcp, which both servers are built on.
+
+    An unbounded `mcp>=1.0` resolves to 2.x, so this must read as a version pin
+    issue rather than a mystery ImportError.
+    """
+    import importlib.metadata as md
+
+    monkeypatch.setattr(md, "version", lambda name: "2.0.0")
+    report = doctor.Report()
+    doctor.check_mcp(report, _cfg())
+    row = _find(report, "Hosted MCP server")
+    assert row[0] == doctor.FAIL
+    assert "2.x removed" in row[2]
+    assert "mcp>=1.2,<2" in row[3]
+
+
+def test_dual_mcp_servers_warn_about_shared_tool_names(monkeypatch):
+    """Both servers expose store_summary; the wrong one writes to the wrong DB."""
+    monkeypatch.setenv("LESSONLENS_USER_EMAIL", "me@example.com")
+    report = doctor.Report()
+    doctor.check_mcp(report, _cfg())
+    row = _find(report, "MCP server ambiguity")
+    assert row is not None, "an active local server alongside hosted must be flagged"
+    assert row[0] == doctor.WARN
+    assert report.failed is False
+
+
+def test_no_ambiguity_warning_when_only_hosted_configured(monkeypatch):
+    monkeypatch.delenv("LESSONLENS_USER_EMAIL", raising=False)
+    report = doctor.Report()
+    doctor.check_mcp(report, _cfg())
+    assert _find(report, "MCP server ambiguity") is None
+
+
 def test_probe_failure_is_reported(monkeypatch):
     monkeypatch.setenv("LESSONLENS_AGENT_CMD", "false {session_id}")
     report = doctor.Report()
