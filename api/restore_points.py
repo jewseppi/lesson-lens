@@ -32,6 +32,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_RETENTION_DAYS = 7
+# Age alone doesn't bound disk use: snapshots include images, and a busy day can
+# produce many. Keep at most this many per user, newest first.
+DEFAULT_MAX_POINTS = 20
 
 # Reasons are stored verbatim and shown in the UI; keep them short and specific.
 REASON_SYNC = "pre-sync"
@@ -68,8 +71,35 @@ def retention_days() -> int:
     return value if value > 0 else DEFAULT_RETENTION_DAYS
 
 
+def max_points() -> int:
+    """Maximum snapshots kept per user (LESSONLENS_RESTORE_MAX_POINTS)."""
+    raw = os.environ.get("LESSONLENS_RESTORE_MAX_POINTS", "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_POINTS
+    return value if value > 0 else DEFAULT_MAX_POINTS
+
+
 def ensure_table(conn) -> None:
     conn.execute(CREATE_TABLE_SQL)
+
+
+def enforce_max_points(conn, user_id: int, directory: str, limit: int | None = None) -> int:
+    """Drop the oldest snapshots beyond the per-user cap. Returns how many went."""
+    ensure_table(conn)
+    cap = limit if limit is not None else max_points()
+    rows = conn.execute(
+        "SELECT id, filename FROM restore_points WHERE user_id = ?"
+        " ORDER BY datetime(created_at) DESC, id DESC",
+        (user_id,),
+    ).fetchall()
+    removed = 0
+    for row in rows[cap:]:
+        _unlink(directory, row["filename"])
+        conn.execute("DELETE FROM restore_points WHERE id = ?", (row["id"],))
+        removed += 1
+    return removed
 
 
 def _now(now: datetime | None = None) -> datetime:

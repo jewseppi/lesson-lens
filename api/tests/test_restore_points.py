@@ -198,3 +198,57 @@ def test_read_bytes_cannot_escape_directory(conn, tmp_path):
 def test_reason_constants_are_distinct():
     reasons = {rp.REASON_SYNC, rp.REASON_IMPORT, rp.REASON_REPARSE, rp.REASON_ROLLBACK}
     assert len(reasons) == 4
+
+
+# --- count cap ------------------------------------------------------------
+# Age alone does not bound disk use: snapshots now contain images, and the
+# scheduled updater can produce one per run.
+
+def test_max_points_cap_drops_oldest(conn, tmp_path):
+    created = [
+        _make(conn, tmp_path, now=NOW - timedelta(hours=n), data=f"snap{n}".encode())
+        for n in range(6)
+    ]
+    conn.commit()
+
+    removed = rp.enforce_max_points(conn, 1, str(tmp_path), limit=3)
+    conn.commit()
+
+    assert removed == 3
+    remaining = rp.list_restore_points(conn, 1, now=NOW)
+    assert len(remaining) == 3
+    # created[0] is newest (NOW - 0h); the three oldest must be gone.
+    assert {r["id"] for r in remaining} == {c["id"] for c in created[:3]}
+    for gone in created[3:]:
+        assert not (tmp_path / gone["filename"]).exists()
+
+
+def test_max_points_cap_is_configurable(monkeypatch):
+    monkeypatch.setenv("LESSONLENS_RESTORE_MAX_POINTS", "5")
+    assert rp.max_points() == 5
+    monkeypatch.setenv("LESSONLENS_RESTORE_MAX_POINTS", "junk")
+    assert rp.max_points() == rp.DEFAULT_MAX_POINTS
+    monkeypatch.setenv("LESSONLENS_RESTORE_MAX_POINTS", "-1")
+    assert rp.max_points() == rp.DEFAULT_MAX_POINTS
+
+
+def test_max_points_cap_is_per_user(conn, tmp_path):
+    conn.execute("INSERT INTO users (email) VALUES ('other@example.com')")
+    for n in range(4):
+        _make(conn, tmp_path, user_id=1, now=NOW - timedelta(hours=n))
+    for n in range(4):
+        _make(conn, tmp_path, user_id=2, now=NOW - timedelta(hours=n))
+    conn.commit()
+
+    rp.enforce_max_points(conn, 1, str(tmp_path), limit=2)
+    conn.commit()
+
+    assert len(rp.list_restore_points(conn, 1, now=NOW)) == 2
+    assert len(rp.list_restore_points(conn, 2, now=NOW)) == 4, "other users must be untouched"
+
+
+def test_cap_is_a_noop_under_the_limit(conn, tmp_path):
+    _make(conn, tmp_path)
+    conn.commit()
+    assert rp.enforce_max_points(conn, 1, str(tmp_path), limit=10) == 0
+    assert len(rp.list_restore_points(conn, 1, now=NOW)) == 1

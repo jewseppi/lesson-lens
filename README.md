@@ -82,8 +82,14 @@ Every operation that rewrites your parsed data — chat sync, backup import, and
 re-parse — takes a **restore point** first: a full snapshot (chat, summaries, and
 images) captured immediately before the change.
 
-- Kept for **7 days**, then deleted automatically. Override with
-  `LESSONLENS_RESTORE_RETENTION_DAYS`.
+- Kept for **7 days**, then deleted automatically, and capped at **20 per user**
+  (`LESSONLENS_RESTORE_RETENTION_DAYS` / `LESSONLENS_RESTORE_MAX_POINTS`) — the
+  cap matters because snapshots include images.
+- Re-syncing an unchanged export is a no-op and does **not** create a snapshot,
+  so the scheduled updater doesn't fill your disk.
+- Summaries have their own, cheaper history: they're append-only, so the summary
+  page has a **History** toggle to restore an earlier version without touching a
+  snapshot.
 - **Settings → Restore Points** lists them with what each contains and when it
   expires, and gives you a confirm-guarded **Roll Back** button plus a download.
 - Rolling back **takes a snapshot of the current state first**, so a rollback is

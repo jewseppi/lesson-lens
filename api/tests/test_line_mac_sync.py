@@ -232,6 +232,82 @@ def test_client_login_missing_token(monkeypatch):
         client.login("me@example.com", "pw")
 
 
+def test_push_uses_remote_credentials_not_local(tmp_path, monkeypatch, capsys):
+    """--push must authenticate to the HOSTED instance with its own credentials.
+
+    The local instance and the hosted one can have different logins; reusing the
+    local ones silently pushed to the wrong account (or failed auth).
+    """
+    sent = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, email, password):
+            sent["local_login"] = (email, password)
+
+        def list_sessions(self):
+            return []
+
+        def sync_remote(self, url, email, password, replace_existing=False):
+            sent["remote"] = (url, email, password)
+            return {"session_count": 1}
+
+    monkeypatch.setattr(m, "LessonLensClient", FakeClient)
+    monkeypatch.setenv("LESSONLENS_TARGET", "local")
+    monkeypatch.setenv("LESSONLENS_EMAIL", "local@example.com")
+    monkeypatch.setenv("LESSONLENS_PASSWORD", "local-pw")
+    monkeypatch.setenv("LESSONLENS_REMOTE_EMAIL", "hosted@example.com")
+    monkeypatch.setenv("LESSONLENS_REMOTE_PASSWORD", "hosted-pw")
+    monkeypatch.setenv("LESSONLENS_REMOTE_URL", "https://hosted.example.com")
+
+    args = m.build_arg_parser().parse_args([
+        "--target", "local", "--push", "--sync-only",
+        "--skip-export", "--skip-images",
+        "--state-file", str(tmp_path / "state.json"),
+    ])
+    assert m.run(args) == 0
+
+    assert sent["local_login"] == ("local@example.com", "local-pw")
+    assert sent["remote"] == ("https://hosted.example.com", "hosted@example.com", "hosted-pw")
+
+
+def test_push_falls_back_to_local_credentials(tmp_path, monkeypatch):
+    """When no remote-specific credentials are set, reuse the local ones."""
+    sent = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, email, password):
+            pass
+
+        def list_sessions(self):
+            return []
+
+        def sync_remote(self, url, email, password, replace_existing=False):
+            sent["remote"] = (url, email, password)
+            return {}
+
+    monkeypatch.setattr(m, "LessonLensClient", FakeClient)
+    for key in ("LESSONLENS_REMOTE_EMAIL", "LESSONLENS_REMOTE_PASSWORD", "LESSONLENS_REMOTE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LESSONLENS_TARGET", "local")
+    monkeypatch.setenv("LESSONLENS_EMAIL", "same@example.com")
+    monkeypatch.setenv("LESSONLENS_PASSWORD", "same-pw")
+    monkeypatch.setenv("LESSONLENS_API_URL", "https://hosted.example.com")
+
+    args = m.build_arg_parser().parse_args([
+        "--target", "local", "--push", "--sync-only",
+        "--skip-export", "--skip-images",
+        "--state-file", str(tmp_path / "state.json"),
+    ])
+    assert m.run(args) == 0
+    assert sent["remote"] == ("https://hosted.example.com", "same@example.com", "same-pw")
+
+
 def test_run_dry_run(tmp_path, capsys):
     # An export in a searched dir + one image dir; --dry-run makes no network calls.
     export_dir = tmp_path / "dl"

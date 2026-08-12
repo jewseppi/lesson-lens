@@ -187,10 +187,30 @@ rewrite parsed data (import with `replace_existing` calls
 Snapshot filenames are sanitized on both write and read, so a tampered `filename`
 column cannot read outside the snapshot directory (covered by a test).
 
-**Not covered:** per-summary writes (`store_summary` / `/summary/import`) don't
-snapshot — a full archive per summary would be far too heavy when an agent is
-writing a backlog. The previous summary is still contained in the most recent
-sync snapshot.
+**Per-summary rollback** is handled separately, and cheaply. `lesson_summaries`
+is append-only — `_store_lesson_summary` INSERTs and reads take the newest row —
+so every regeneration and agent write *already* leaves its predecessor in the
+table. No new storage was needed: `GET /api/sessions/<id>/summary/versions` lists
+them and `POST .../versions/<vid>/restore` re-inserts an older payload as the new
+newest row. Restoring deletes nothing, so it is itself undoable. The UI is a
+"History" toggle on the summary page.
+
+### Follow-up fixes
+
+- **`GET /api/attachments` join** — joined `session_attachments.session_id`
+  against the session *string* while everything else writes the integer
+  `sessions.id`, so it matched nothing and every attachment looked unassigned.
+  Now joins on either form and reports the session-id string.
+- **No-op syncs no longer snapshot.** The capture sat before the duplicate-file
+  check, so the scheduled daily updater would write a full archive (images
+  included) on every run even when the export hadn't changed. It now fires only
+  once a sync is known to mutate.
+- **Snapshot count is capped** (`LESSONLENS_RESTORE_MAX_POINTS`, default 20).
+  Age alone stopped bounding disk use once archives contained images.
+- **`--push` credentials are separate.** It reused the *local* login as the
+  hosted one; with different logins that pushed to the wrong account or failed
+  auth. Now `--remote-email` / `--remote-password` / `LESSONLENS_REMOTE_*`, still
+  falling back to the local values when they match.
 
 ## Automation added (this branch)
 

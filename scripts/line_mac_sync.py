@@ -411,7 +411,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--remote-url",
         default=None,
-        help="Hosted URL to push to with --push (default: $LESSONLENS_API_URL)",
+        help="Hosted URL to push to with --push (default: $LESSONLENS_REMOTE_URL, else $LESSONLENS_API_URL)",
+    )
+    parser.add_argument(
+        "--remote-email",
+        default=None,
+        help=(
+            "Login for the HOSTED instance when pushing (default: $LESSONLENS_REMOTE_EMAIL, "
+            "else $LESSONLENS_EMAIL). Set this when local and hosted logins differ."
+        ),
+    )
+    parser.add_argument(
+        "--remote-password",
+        default=None,
+        help="Password for the HOSTED instance when pushing (default: $LESSONLENS_REMOTE_PASSWORD, else $LESSONLENS_PASSWORD)",
     )
     return parser
 
@@ -575,17 +588,35 @@ def run(args: argparse.Namespace) -> int:
                 "(you are already syncing straight to hosted); skipping."
             )
         else:
-            remote_url = args.remote_url or os.environ.get("LESSONLENS_API_URL", "")
-            if not (remote_url and cfg.email and cfg.password):
+            # The hosted instance may well have different credentials than the
+            # local one, so resolve them separately and only fall back to the
+            # local login when no remote-specific values are given.
+            remote_url = (
+                args.remote_url
+                or os.environ.get("LESSONLENS_REMOTE_URL")
+                or os.environ.get("LESSONLENS_API_URL", "")
+            )
+            remote_email = (
+                args.remote_email
+                or os.environ.get("LESSONLENS_REMOTE_EMAIL")
+                or cfg.email
+            )
+            remote_password = (
+                args.remote_password
+                or os.environ.get("LESSONLENS_REMOTE_PASSWORD")
+                or cfg.password
+            )
+            if not (remote_url and remote_email and remote_password):
                 _log(
-                    "WARNING: --push needs a hosted URL plus LESSONLENS_EMAIL/"
-                    "LESSONLENS_PASSWORD; skipping."
+                    "WARNING: --push needs a hosted URL, email and password "
+                    "(--remote-url/--remote-email/--remote-password or "
+                    "LESSONLENS_REMOTE_*); skipping."
                 )
             else:
                 try:
-                    pushed = client.sync_remote(remote_url, cfg.email, cfg.password)
+                    pushed = client.sync_remote(remote_url, remote_email, remote_password)
                     summary["push"] = pushed
-                    _log(f"Pushed local -> hosted: {pushed}")
+                    _log(f"Pushed local -> hosted ({remote_url}): {pushed}")
                 except ApiError as exc:
                     _log(f"WARNING: push to hosted failed: {exc}")
 

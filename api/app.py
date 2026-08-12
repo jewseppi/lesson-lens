@@ -1154,6 +1154,8 @@ def _capture_restore_point(conn, user_id, reason):
         created = _restore_points.create_restore_point(
             conn, user_id, reason, archive_bytes, RESTORE_POINTS_FOLDER, manifest=manifest,
         )
+        # Age alone doesn't bound disk use once images are in the archives.
+        _restore_points.enforce_max_points(conn, user_id, RESTORE_POINTS_FOLDER)
         conn.commit()
         return created
     except Exception:
@@ -2397,10 +2399,6 @@ def sync_file():
         if not file.filename:
             return jsonify({"error": "No file selected"}), 400
 
-        # Snapshot before merging anything into the canonical run, so a bad sync
-        # is one click away from being undone.
-        _capture_restore_point(conn, user["id"], _restore_points.REASON_SYNC)
-
         _, ext = os.path.splitext(file.filename)
         if ext.lower() not in ALLOWED_EXTENSIONS:
             return jsonify({"error": "Only .txt files allowed"}), 400
@@ -2452,6 +2450,12 @@ def sync_file():
             )
             conn.commit()
             upload_id = cursor.lastrowid
+
+        # Snapshot only once we know this sync will actually change something.
+        # Deliberately placed after the duplicate-file no-op above: re-syncing an
+        # unchanged export is the common case for the scheduled updater, and
+        # snapshotting it would write a full archive (images included) every run.
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_SYNC)
 
         # Parse the new file
         import sys as _sys
@@ -2735,6 +2739,110 @@ def get_summary(session_id):
         lesson_data = json.loads(summary["lesson_data_json"])
         _track_event(conn, user["id"], "view_summary", {"session_id": session_id})
         return jsonify(lesson_data)
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/summary/versions", methods=["GET"])
+@jwt_required()
+def list_summary_versions(session_id):
+    """Previous versions of a session's summary.
+
+    Summaries are append-only — ``_store_lesson_summary`` INSERTs and reads take
+    the newest row — so every regeneration or agent write already leaves the
+    prior version behind. This exposes that history so a bad summary write can be
+    undone without restoring a whole snapshot.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        rows = conn.execute(
+            "SELECT id, provider, model, created_at, lesson_data_json"
+            " FROM lesson_summaries WHERE session_id = ? AND user_id = ?"
+            " ORDER BY datetime(created_at) DESC, id DESC",
+            (session_id, user["id"]),
+        ).fetchall()
+
+        versions = []
+        for index, row in enumerate(rows):
+            try:
+                payload = json.loads(row["lesson_data_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            versions.append({
+                "id": row["id"],
+                "provider": row["provider"],
+                "model": row["model"],
+                "created_at": row["created_at"],
+                "is_current": index == 0,
+                "title": payload.get("title", ""),
+                "vocabulary_count": len(payload.get("vocabulary", []) or []),
+                "key_sentence_count": len(payload.get("key_sentences", []) or []),
+            })
+        return jsonify({"session_id": session_id, "versions": versions}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/summary/versions/<int:version_id>/restore", methods=["POST"])
+@jwt_required()
+def restore_summary_version(session_id, version_id):
+    """Make an earlier summary version current again.
+
+    Re-inserts the chosen payload as a new newest row rather than deleting the
+    ones after it, so restoring is non-destructive and itself undoable.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        row = conn.execute(
+            "SELECT * FROM lesson_summaries WHERE id = ? AND session_id = ? AND user_id = ?",
+            (version_id, session_id, user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Summary version not found"}), 404
+
+        current = conn.execute(
+            "SELECT id FROM lesson_summaries WHERE session_id = ? AND user_id = ?"
+            " ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (session_id, user["id"]),
+        ).fetchone()
+        if current and current["id"] == version_id:
+            return jsonify({"message": "That version is already current", "version_id": version_id}), 200
+
+        conn.execute(
+            """INSERT INTO lesson_summaries
+               (session_db_id, run_id, session_id, user_id, provider, model, lesson_data_json, output_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["session_db_id"],
+                row["run_id"],
+                row["session_id"],
+                user["id"],
+                f"restored:{row['provider']}",
+                row["model"],
+                row["lesson_data_json"],
+                row["output_dir"],
+            ),
+        )
+        _track_event(conn, user["id"], "restore_summary_version", {
+            "session_id": session_id,
+            "version_id": version_id,
+        })
+        conn.commit()
+        return jsonify({
+            "message": "Summary version restored",
+            "session_id": session_id,
+            "restored_from": version_id,
+        }), 200
     finally:
         conn.close()
 
@@ -4106,10 +4214,18 @@ def list_attachments():
         attachments = []
         for r in rows:
             # Get session assignments
+            # session_attachments.session_id holds the INTEGER sessions.id (what
+            # the upload path and /api/sessions/<id>/attachments both write and
+            # read). This previously joined on the session *string*, so it
+            # matched nothing and every attachment looked unassigned. The OR
+            # keeps any legacy string-valued rows working; the two forms cannot
+            # collide because session ids are dates, never row ids.
             assignments = conn.execute(
-                """SELECT sa.*, s.date, s.start_time, s.end_time
+                """SELECT sa.*, s.session_id AS session_key, s.date, s.start_time, s.end_time
                    FROM session_attachments sa
-                   JOIN sessions s ON sa.session_id = s.session_id AND sa.user_id = s.user_id
+                   JOIN sessions s
+                     ON (s.id = sa.session_id OR s.session_id = sa.session_id)
+                    AND s.user_id = sa.user_id
                    WHERE sa.attachment_id = ? AND sa.user_id = ?""",
                 (r["id"], user["id"]),
             ).fetchall()
@@ -4122,7 +4238,8 @@ def list_attachments():
                 "captured_at_utc": r["captured_at_utc"],
                 "ingested_at": r["ingested_at"],
                 "sessions": [{
-                    "session_id": a["session_id"],
+                    # Report the session-id string, not the raw row id.
+                    "session_id": a["session_key"],
                     "confidence": a["match_confidence"],
                     "reason": a["match_reason"],
                     "assigned_by": a["assigned_by"],
