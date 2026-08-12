@@ -113,6 +113,20 @@ the updater at a folder where you save images instead, and the rest of the flow
 is unchanged. This is a deliberate design choice — a reliable folder-watch
 fallback over a brittle attempt to decrypt LINE's DB.
 
+The second half of that constraint is *where* the updater runs. LINE only ever
+talks to the machine it runs on, so the LINE→app half of the chain is local by
+definition: it has to execute on the Mac. A hosted server or a CI container can
+never reach it, no matter how it's credentialed. That's why the flow is
+Mac→hosted and not the reverse, and why `doctor` now reports a missing LINE
+install as its own distinct diagnosis — "you're on the wrong machine" is a
+different problem from "you haven't exported yet", and conflating them sent you
+looking for a permissions fix that doesn't exist.
+
+Relatedly, `doctor` used to report the missing first export as a `WARN`, which
+made a correctly wired fresh setup look broken — the one state every new install
+starts in. It's now a `TODO` with the exact click-path, and the summary line
+reads "setup is wired up correctly, manual step(s) left".
+
 ## Generation without a provider API key (second pass)
 
 The first pass of the updater targeted the hosted server and called

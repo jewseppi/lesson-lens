@@ -219,15 +219,84 @@ def test_no_ambiguity_warning_when_only_hosted_configured(monkeypatch):
 # The server can't tell you about these, and they're what actually blocks a
 # first `make update`.
 
+def _fake_line_app(tmp_path):
+    """A path layout that makes _line_app_present() report LINE as installed."""
+    app = tmp_path / "Applications" / "LINE.app"
+    app.mkdir(parents=True)
+    return [str(app)]
+
+
 def test_missing_export_lists_what_was_searched(tmp_path):
     report = doctor.Report()
-    doctor.check_line_setup(report, export_dirs=[tmp_path / "nope"], image_dirs=[])
+    doctor.check_line_setup(
+        report,
+        export_dirs=[tmp_path / "nope"],
+        image_dirs=[],
+        app_paths=_fake_line_app(tmp_path),
+    )
     row = _find(report, "LINE chat export")
-    assert row[0] == doctor.WARN
-    assert "right-click the chat" in row[3]
+    # A step you haven't taken yet, not a misconfiguration: on a fresh Mac there
+    # is nothing to find until the first export, and calling that a warning made
+    # a correct setup look broken.
+    assert row[0] == doctor.TODO
+    assert "Save chat history" in row[3]
     assert "nope" in row[3], "the searched paths must be shown"
     assert "--export-file" in row[3]
-    assert report.failed is False, "a missing export is a warning, not a hard failure"
+    assert report.failed is False, "a missing export is not a hard failure"
+
+
+def test_missing_export_says_update_still_does_useful_work(tmp_path):
+    report = doctor.Report()
+    doctor.check_line_setup(
+        report, export_dirs=[], image_dirs=[], app_paths=_fake_line_app(tmp_path)
+    )
+    row = _find(report, "LINE chat export")
+    assert "still works" in row[3]
+
+
+def test_no_line_app_names_the_real_problem(tmp_path):
+    """Running somewhere LINE isn't — the container/server case."""
+    report = doctor.Report()
+    doctor.check_line_setup(
+        report, export_dirs=[tmp_path / "nope"], image_dirs=[], app_paths=[]
+    )
+    row = _find(report, "LINE desktop app")
+    assert row[0] == doctor.FAIL
+    assert "not installed" in row[2]
+    assert "has to" in row[3] and "Mac" in row[3]
+    # Don't ask for an export that cannot exist here.
+    assert _find(report, "LINE chat export") is None
+
+
+def test_no_line_app_does_not_blame_encryption(tmp_path):
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[], image_dirs=[], app_paths=[])
+    row = _find(report, "LINE image cache")
+    assert "not installed here" in row[2]
+    assert "encrypt" not in row[3], "wrong diagnosis when LINE simply isn't here"
+
+
+def test_export_present_does_not_flag_missing_line_app(tmp_path):
+    """An export in hand is proof enough; don't nag about the app bundle."""
+    (tmp_path / "[LINE] Chat with Jessie.txt").write_text("2026.03.08 Sunday\n")
+    report = doctor.Report()
+    doctor.check_line_setup(
+        report, export_dirs=[tmp_path], image_dirs=[], app_paths=[]
+    )
+    assert _find(report, "LINE desktop app") is None
+    assert _find(report, "LINE chat export")[0] == doctor.OK
+
+
+def test_todo_render_reports_setup_correct_with_steps_left(tmp_path, capsys):
+    report = doctor.Report()
+    doctor.check_line_setup(
+        report, export_dirs=[], image_dirs=[], app_paths=_fake_line_app(tmp_path)
+    )
+    report.render()
+    out = capsys.readouterr().out
+    assert "Setup is wired up correctly" in out
+    assert "LINE chat export" in out
+    assert report.failed is False
 
 
 def test_found_export_is_reported(tmp_path):
@@ -260,11 +329,15 @@ def test_image_cache_counted(tmp_path):
     assert "2 image file(s)" in row[2]
 
 
-def test_no_cache_dir_suggests_the_folder_fallback():
+def test_no_cache_dir_suggests_the_folder_fallback(tmp_path):
     report = doctor.Report()
-    doctor.check_line_setup(report, export_dirs=[], image_dirs=[])
+    # Pin the app path: this must assert the same thing whether or not the
+    # machine running the tests happens to have LINE installed.
+    doctor.check_line_setup(
+        report, export_dirs=[], image_dirs=[], app_paths=_fake_line_app(tmp_path)
+    )
     row = _find(report, "LINE image cache")
-    assert row[0] == doctor.WARN
+    assert row[0] == doctor.TODO
     assert "--images-dir" in row[3]
     assert report.failed is False
 

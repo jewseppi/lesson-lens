@@ -18,10 +18,14 @@ session by EXIF/timestamp, exactly as the manual upload flow does.
 The one manual step that remains
 --------------------------------
 macOS LINE has no scriptable "export chat" hook, so you still trigger the export
-from LINE's UI once (right-click the chat → export). Everything after that is
-this one command. If reading LINE's encrypted cache doesn't yield usable images
-on your machine, point ``--images-dir`` at a folder where you save images and
-the rest of the flow is unchanged.
+from LINE's UI once: open the lesson chat → chat menu (top-right) → Save chat
+history. Everything after that is this one command.
+
+This script has to run on the Mac itself. LINE only talks to the machine it runs
+on, so no amount of credentialing lets a hosted server or container reach it —
+which is why the flow is Mac → hosted, and never the other way. If reading
+LINE's encrypted cache doesn't yield usable images on your machine, point
+``--images-dir`` at a folder where you save images and the rest is unchanged.
 
 Configuration
 -------------
@@ -540,9 +544,10 @@ def run(args: argparse.Namespace) -> int:
             _log(
                 "Chat export: none found (skipping chat sync). Searched:\n  "
                 + "\n  ".join(searched_dirs_report(export_dirs))
-                + "\nExport the chat from LINE (right-click the chat -> export), or pass"
-                "\n--export-file /path/to/export.txt. To locate it:"
-                "\n  mdfind -name '.txt' -onlyin ~ | head -20"
+                + "\nIn LINE for Mac: open the lesson chat -> chat menu (top-right)"
+                "\n-> Save chat history -> save the .txt to Downloads or Desktop."
+                "\nAlready have one elsewhere? --export-file /path/to/export.txt"
+                "\nTo locate it: mdfind -name '.txt' -onlyin ~ | head -20"
             )
 
     # --- Discover new images ---

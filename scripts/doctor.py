@@ -40,6 +40,11 @@ from lessonlens_config import load_config  # noqa: E402
 OK = "PASS"
 WARN = "WARN"
 FAIL = "FAIL"
+# Distinct from WARN: nothing is misconfigured, there is simply a manual step
+# left to do. Exporting a chat out of LINE is the one link in the chain with no
+# scripting hook, so on a fresh machine its absence is the *expected* state —
+# reporting that as a warning made a correct setup look broken.
+TODO = "TODO"
 
 
 class Report:
@@ -55,18 +60,21 @@ class Report:
             self.failed = True
 
     def render(self) -> None:
+        symbols = {FAIL: "x", WARN: "!", TODO: ">", OK: "+"}
         print()
         for status, name, detail, fix in self.rows:
-            symbol = "x" if status == FAIL else ("!" if status == WARN else "+")
-            print(f"[{symbol}] {status:4}  {name}")
+            print(f"[{symbols.get(status, '+')}] {status:4}  {name}")
             if detail:
                 print(f"           {detail}")
             if fix:
                 for line in fix.splitlines():
                     print(f"           -> {line}")
         print()
+        todos = [name for status, name, _, _ in self.rows if status == TODO]
         if self.failed:
             print("Some required checks failed. Fix the items marked FAIL above, then re-run.")
+        elif todos:
+            print("Setup is wired up correctly. Manual step(s) left: " + ", ".join(todos))
         else:
             print("All required checks passed.")
 
@@ -154,7 +162,34 @@ def check_restore_points(report: Report, client):
     )
 
 
-def check_line_setup(report: Report, export_dirs=None, image_dirs=None):
+LINE_APP_PATHS = (
+    "/Applications/LINE.app",
+    "~/Applications/LINE.app",
+)
+
+EXPORT_STEPS = (
+    "In LINE for Mac, open the lesson chat, then:\n"
+    "   chat menu (v / ... at the top-right of the chat window)\n"
+    "   -> Settings / Save chat history -> save as .txt\n"
+    "Save it to Downloads or Desktop (both are searched) and re-run this."
+)
+
+
+def _line_app_present(app_paths=None) -> bool:
+    """Is the LINE desktop app installed on this machine at all?
+
+    Worth distinguishing: 'no export yet' is a step you have not taken, while
+    'no LINE here' means you are on the wrong machine — the failure mode when the
+    updater is run somewhere other than the Mac that LINE runs on.
+    """
+    home = Path.home()
+    for raw in app_paths if app_paths is not None else LINE_APP_PATHS:
+        if Path(str(raw).replace("~", str(home))).exists():
+            return True
+    return (home / "Library/Containers/jp.naver.line.mac").exists()
+
+
+def check_line_setup(report: Report, export_dirs=None, image_dirs=None, app_paths=None):
     """Check the Mac side: is there an export to sync, and images to grab?
 
     This is the half of the chain the server cannot tell you about, and the half
@@ -164,16 +199,33 @@ def check_line_setup(report: Report, export_dirs=None, image_dirs=None):
 
     export_dirs = export_dirs if export_dirs is not None else sync.default_export_dirs()
     candidates = sync.find_export_candidates(export_dirs)
+    line_installed = _line_app_present(app_paths)
 
-    if not candidates:
+    if not candidates and not line_installed:
         report.add(
-            WARN,
+            FAIL,
+            "LINE desktop app",
+            "LINE is not installed on this machine",
+            "LINE only ever talks to the machine it runs on, so the updater has to\n"
+            "run on your Mac — a server or container cannot reach it.\n"
+            "If your exports live elsewhere, sync only what you already have:\n"
+            '  make update ARGS="--export-file /path/to/export.txt"',
+            required=False,
+        )
+    elif not candidates:
+        report.add(
+            TODO,
             "LINE chat export",
-            "no .txt export found in any candidate directory",
-            "In LINE, right-click the chat -> export, then re-run. Searched:\n"
+            "LINE is installed, but no .txt export found yet — expected before your first export",
+            "This is the one step with no scripting hook; everything after it is automatic.\n"
+            + EXPORT_STEPS
+            + "\nSearched:\n"
             + "\n".join(f"   {line}" for line in sync.searched_dirs_report(export_dirs))
-            + "\nIf it landed elsewhere: make update ARGS=\"--export-file /path/to/export.txt\""
-            "\nTo find it: mdfind -name '.txt' -onlyin ~ | head -20",
+            + "\nAlready exported? Point at it directly:\n"
+            '  make update ARGS="--export-file /path/to/export.txt"'
+            "\nTo find it: mdfind -name '.txt' -onlyin ~ | head -20"
+            "\nMeanwhile `make update` still works: it syncs images and fills the\n"
+            "summary backlog, and just skips the chat step.",
             required=False,
         )
     else:
@@ -200,12 +252,20 @@ def check_line_setup(report: Report, export_dirs=None, image_dirs=None):
     dirs = image_dirs if image_dirs is not None else sync.discover_cache_dirs(sync.default_cache_dirs())
     if not dirs:
         report.add(
-            WARN,
+            TODO if line_installed else WARN,
             "LINE image cache",
-            "no LINE media cache directory found",
-            "Recent LINE versions encrypt local storage, so this can be expected.\n"
-            "Save lesson images to a folder and use:\n"
-            "  make update ARGS=\"--images-dir ~/Pictures/line-lessons\"",
+            "no LINE media cache directory found"
+            + ("" if line_installed else " (LINE is not installed here)"),
+            (
+                "Recent LINE versions encrypt local storage, so this is common even\n"
+                "with LINE installed — it is not a misconfiguration.\n"
+                if line_installed
+                else "Images live on the machine running LINE; there is nothing to scan here.\n"
+            )
+            + "Save lesson images to a folder and point the updater at it:\n"
+            '  make update ARGS="--images-dir ~/Pictures/line-lessons"\n'
+            "Capture time is read from each file, so drag-and-drop keeps the\n"
+            "image-to-lesson matching working.",
             required=False,
         )
         return

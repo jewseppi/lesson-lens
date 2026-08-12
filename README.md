@@ -19,6 +19,12 @@ when something is wrong, prints the fix rather than a stack trace:
   fallback when LINE's encrypted storage yields nothing.
 - Hosted login, sessions, restore points, MCP server, agent command.
 
+**Run it before your first export.** On a fresh Mac there is no export yet, and
+doctor says so as a `TODO` with the steps to make one — not a failure. It only
+reports `FAIL` for things that are actually wrong. If LINE isn't installed at
+all, it says *that* instead, because LINE only ever talks to the machine it runs
+on: the updater has to run on your Mac, and no server or container can reach it.
+
 The export search covers the **sandboxed** Mac App Store LINE (whose Downloads
 lives inside its container, not your home folder) as well as iCloud Desktop and
 Documents. Exit code is 0 only when every required check passes, so it can gate a
@@ -32,8 +38,11 @@ your hosted LessonLens in sync:
 ```bash
 # 1) One-time: copy .env.example to .env and set the hosted-server vars
 #    LESSONLENS_API_URL / LESSONLENS_EMAIL / LESSONLENS_PASSWORD
-# 2) In LINE, export the chat (right-click the chat → export) — this is the one
-#    manual step macOS LINE can't automate.
+# 2) In LINE for Mac, open the lesson chat -> chat menu (top-right) ->
+#    Save chat history -> save the .txt to Downloads or Desktop.
+#    This is the one manual step: macOS LINE exposes no scripting hook, so
+#    nothing can trigger it for you. `make doctor` lists it as a TODO until
+#    you've done it once; after that, re-exporting is all that's ever needed.
 # 3) Then, whenever you want to refresh:
 make update            # sync newest export + any new images, generate latest lesson
 make update-dry        # preview what would sync (no network, no changes)
