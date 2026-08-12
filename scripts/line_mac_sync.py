@@ -137,22 +137,39 @@ def file_sha256(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def default_export_dirs() -> list[Path]:
+    """Places a LINE chat export plausibly lands on macOS.
+
+    The container paths matter: LINE from the Mac App Store is sandboxed, so its
+    "Downloads"/"Desktop" are redirected inside the container rather than the
+    real home folder. iCloud Desktop/Documents matter for anyone with Desktop &
+    Documents syncing turned on.
+    """
     home = Path.home()
+    container = home / "Library/Containers/jp.naver.line.mac/Data"
+    icloud = home / "Library/Mobile Documents/com~apple~CloudDocs"
     return [
         home / "Downloads",
         home / "Desktop",
         home / "Documents",
+        # Sandboxed LINE writes here instead of the real ~/Downloads.
+        container / "Downloads",
+        container / "Desktop",
+        container / "Documents",
+        icloud / "Desktop",
+        icloud / "Documents",
     ]
 
 
 def default_cache_dirs() -> list[Path]:
     home = Path.home()
+    container = home / "Library/Containers/jp.naver.line.mac/Data"
     return [
         # Mac App Store (sandboxed) LINE
-        home
-        / "Library/Containers/jp.naver.line.mac/Data/Library/Application Support/LINE",
+        container / "Library/Application Support/LINE",
+        container / "Library/Caches",
         # Non-sandboxed install
         home / "Library/Application Support/LINE",
+        home / "Library/Caches/jp.naver.line.mac",
     ]
 
 
@@ -191,6 +208,45 @@ def find_latest_export(
     hinted = [p for p in txts if any(h in p.name.lower() for h in EXPORT_NAME_HINTS)]
     pool = hinted or txts
     return max(pool, key=mtime)
+
+
+def find_export_candidates(export_dirs: list[Path], limit: int = 10) -> list[dict]:
+    """Every .txt that could be a LINE export, newest first, with why it ranked.
+
+    Used by `make doctor` so a missing export is a report of what was searched
+    rather than a bare "none found".
+    """
+    found: list[dict] = []
+    for directory in export_dirs:
+        if not directory.is_dir():
+            continue
+        try:
+            entries = [p for p in directory.iterdir() if p.is_file() and p.suffix.lower() == ".txt"]
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            hinted = any(h in path.name.lower() for h in EXPORT_NAME_HINTS)
+            found.append({
+                "path": path,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "name_hinted": hinted,
+            })
+    # Name-hinted files first (that is how find_latest_export chooses), then newest.
+    found.sort(key=lambda item: (item["name_hinted"], item["mtime"]), reverse=True)
+    return found[:limit]
+
+
+def searched_dirs_report(export_dirs: list[Path]) -> list[str]:
+    """Human-readable list of which candidate directories exist."""
+    return [
+        f"{'exists' if d.is_dir() else 'missing'}: {d}"
+        for d in export_dirs
+    ]
 
 
 def discover_cache_dirs(candidates: list[Path]) -> list[Path]:
@@ -453,7 +509,13 @@ def run(args: argparse.Namespace) -> int:
         if export_path:
             _log(f"Chat export: {export_path}")
         else:
-            _log("Chat export: none found (skipping chat sync). Use --export-file to point at one.")
+            _log(
+                "Chat export: none found (skipping chat sync). Searched:\n  "
+                + "\n  ".join(searched_dirs_report(export_dirs))
+                + "\nExport the chat from LINE (right-click the chat -> export), or pass"
+                "\n--export-file /path/to/export.txt. To locate it:"
+                "\n  mdfind -name '.txt' -onlyin ~ | head -20"
+            )
 
     # --- Discover new images ---
     new_images: list[tuple[Path, str]] = []

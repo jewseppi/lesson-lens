@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -151,6 +152,84 @@ def check_restore_points(report: Report, client):
         "Restore points",
         f"{len(points)} snapshot(s) held, {retention}-day retention — rollback is armed",
     )
+
+
+def check_line_setup(report: Report, export_dirs=None, image_dirs=None):
+    """Check the Mac side: is there an export to sync, and images to grab?
+
+    This is the half of the chain the server cannot tell you about, and the half
+    that actually blocks a first `make update`.
+    """
+    import line_mac_sync as sync
+
+    export_dirs = export_dirs if export_dirs is not None else sync.default_export_dirs()
+    candidates = sync.find_export_candidates(export_dirs)
+
+    if not candidates:
+        report.add(
+            WARN,
+            "LINE chat export",
+            "no .txt export found in any candidate directory",
+            "In LINE, right-click the chat -> export, then re-run. Searched:\n"
+            + "\n".join(f"   {line}" for line in sync.searched_dirs_report(export_dirs))
+            + "\nIf it landed elsewhere: make update ARGS=\"--export-file /path/to/export.txt\""
+            "\nTo find it: mdfind -name '.txt' -onlyin ~ | head -20",
+            required=False,
+        )
+    else:
+        best = candidates[0]
+        age_days = max(0, int((time.time() - best["mtime"]) / 86400))
+        detail = (
+            f"{best['path']} ({best['size'] // 1024} KB, {age_days}d old)"
+            f"; {len(candidates)} candidate(s)"
+        )
+        if not best["name_hinted"]:
+            report.add(
+                WARN,
+                "LINE chat export",
+                detail + " — name doesn't look like a LINE export",
+                "It will still be used, but confirm it is the right file "
+                "(or pass --export-file explicitly).",
+                required=False,
+            )
+        else:
+            report.add(OK, "LINE chat export", detail)
+
+    # Images. LINE's text export never contains image bytes, so this is where the
+    # automated grab either works or needs the folder fallback.
+    dirs = image_dirs if image_dirs is not None else sync.discover_cache_dirs(sync.default_cache_dirs())
+    if not dirs:
+        report.add(
+            WARN,
+            "LINE image cache",
+            "no LINE media cache directory found",
+            "Recent LINE versions encrypt local storage, so this can be expected.\n"
+            "Save lesson images to a folder and use:\n"
+            "  make update ARGS=\"--images-dir ~/Pictures/line-lessons\"",
+            required=False,
+        )
+        return
+
+    count = 0
+    for _ in sync.iter_candidate_images(dirs, 0):
+        count += 1
+        if count >= 500:  # enough to prove the scan works; don't walk forever
+            break
+    if count:
+        report.add(
+            OK,
+            "LINE image cache",
+            f"{len(dirs)} cache dir(s), {count}{'+' if count >= 500 else ''} image file(s) visible",
+        )
+    else:
+        report.add(
+            WARN,
+            "LINE image cache",
+            f"{len(dirs)} cache dir(s) found but no readable images in them",
+            "Likely encrypted storage. Use --images-dir with a folder where you "
+            "save images instead.",
+            required=False,
+        )
 
 
 def check_mcp(report: Report, cfg):
@@ -316,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Actually run LESSONLENS_AGENT_CMD once against a session that needs a summary",
     )
+    parser.add_argument(
+        "--skip-line",
+        action="store_true",
+        help="Skip the local LINE export/image checks (useful on a server)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(
@@ -336,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
         pending = check_sessions(report, client)
         check_restore_points(report, client)
 
+    if not args.skip_line:
+        check_line_setup(report)
     check_mcp(report, cfg)
     check_agent_command(report, cfg, pending, run_probe=args.check_agent)
 

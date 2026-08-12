@@ -10,10 +10,19 @@ make doctor          # config, hosted login, sessions, restore points, MCP, agen
 make doctor-agent    # ...and actually run your agent command once
 ```
 
-`doctor` walks the whole chain and, when something is wrong, prints the fix
-rather than a stack trace ("Nothing is listening at <url> — start the app first",
-"'claude' is not on PATH", and so on). Exit code is 0 only when every required
-check passes, so it can gate a scheduled run.
+`doctor` walks the whole chain — **including the LINE side on your Mac** — and,
+when something is wrong, prints the fix rather than a stack trace:
+
+- **LINE chat export**: which file it will use, or every directory it searched
+  and how to find yours (`mdfind`) if there isn't one.
+- **LINE image cache**: how many images are visible, or the `--images-dir`
+  fallback when LINE's encrypted storage yields nothing.
+- Hosted login, sessions, restore points, MCP server, agent command.
+
+The export search covers the **sandboxed** Mac App Store LINE (whose Downloads
+lives inside its container, not your home folder) as well as iCloud Desktop and
+Documents. Exit code is 0 only when every required check passes, so it can gate a
+scheduled run; `--skip-line` drops the Mac-side checks when running on a server.
 
 ## One-touch update from your Mac
 

@@ -215,6 +215,78 @@ def test_no_ambiguity_warning_when_only_hosted_configured(monkeypatch):
     assert _find(report, "MCP server ambiguity") is None
 
 
+# --- LINE-side checks -----------------------------------------------------
+# The server can't tell you about these, and they're what actually blocks a
+# first `make update`.
+
+def test_missing_export_lists_what_was_searched(tmp_path):
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[tmp_path / "nope"], image_dirs=[])
+    row = _find(report, "LINE chat export")
+    assert row[0] == doctor.WARN
+    assert "right-click the chat" in row[3]
+    assert "nope" in row[3], "the searched paths must be shown"
+    assert "--export-file" in row[3]
+    assert report.failed is False, "a missing export is a warning, not a hard failure"
+
+
+def test_found_export_is_reported(tmp_path):
+    export = tmp_path / "[LINE] Chat with Jessie.txt"
+    export.write_text("2026.03.08 Sunday\n")
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[tmp_path], image_dirs=[])
+    row = _find(report, "LINE chat export")
+    assert row[0] == doctor.OK
+    assert "Chat with Jessie" in row[2]
+
+
+def test_unhinted_export_name_warns_but_is_still_used(tmp_path):
+    (tmp_path / "notes.txt").write_text("x")
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[tmp_path], image_dirs=[])
+    row = _find(report, "LINE chat export")
+    assert row[0] == doctor.WARN
+    assert "doesn't look like a LINE export" in row[2]
+
+
+def test_image_cache_counted(tmp_path):
+    (tmp_path / "hashed1").write_bytes(b"\xff\xd8\xff" + b"A" * 40)
+    (tmp_path / "hashed2").write_bytes(b"\x89PNG\r\n\x1a\n" + b"B" * 40)
+    (tmp_path / "notes.txt").write_bytes(b"plain text, not an image")
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[], image_dirs=[tmp_path])
+    row = _find(report, "LINE image cache")
+    assert row[0] == doctor.OK
+    assert "2 image file(s)" in row[2]
+
+
+def test_no_cache_dir_suggests_the_folder_fallback():
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[], image_dirs=[])
+    row = _find(report, "LINE image cache")
+    assert row[0] == doctor.WARN
+    assert "--images-dir" in row[3]
+    assert report.failed is False
+
+
+def test_cache_dir_with_no_readable_images_explains_encryption(tmp_path):
+    (tmp_path / "opaque.blob").write_bytes(b"not an image at all")
+    report = doctor.Report()
+    doctor.check_line_setup(report, export_dirs=[], image_dirs=[tmp_path])
+    row = _find(report, "LINE image cache")
+    assert row[0] == doctor.WARN
+    assert "encrypted" in row[3]
+
+
+def test_export_search_covers_sandboxed_line_container():
+    """Mac App Store LINE is sandboxed; its Downloads is inside the container."""
+    import line_mac_sync as sync
+
+    paths = [str(p) for p in sync.default_export_dirs()]
+    assert any("Containers/jp.naver.line.mac/Data/Downloads" in p for p in paths)
+    assert any("com~apple~CloudDocs" in p for p in paths), "iCloud Desktop/Documents too"
+
+
 def test_probe_failure_is_reported(monkeypatch):
     monkeypatch.setenv("LESSONLENS_AGENT_CMD", "false {session_id}")
     report = doctor.Report()
