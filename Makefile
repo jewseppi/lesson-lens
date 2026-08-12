@@ -9,9 +9,11 @@
 
 PYTHON ?= python3
 
-.PHONY: update update-all update-dry update-sync-only update-agent push schedule unschedule test help
+.PHONY: update update-all update-dry update-sync-only update-agent push schedule unschedule doctor doctor-agent test help
 
 help:
+	@echo "make doctor          Check config, hosted login, MCP server and agent command"
+	@echo "make doctor-agent    Same, and actually run your agent command once"
 	@echo "make update          Sync newest LINE export + new images to the hosted app, then generate latest"
 	@echo "make update-all      Sync, then generate every session still missing a summary (backlog fill; idempotent)"
 	@echo "make update-agent    Sync, then generate with your subscription CLI agent (no provider API key)"
@@ -21,6 +23,12 @@ help:
 	@echo "make schedule        Install the launchd job so the update runs automatically (macOS)"
 	@echo "make unschedule      Remove the launchd job"
 	@echo "make test            Run the dependency-light test suite"
+
+doctor:
+	$(PYTHON) scripts/doctor.py $(ARGS)
+
+doctor-agent:
+	$(PYTHON) scripts/doctor.py --check-agent $(ARGS)
 
 update:
 	$(PYTHON) scripts/line_mac_sync.py $(ARGS)
@@ -42,7 +50,8 @@ push:
 
 test:
 	cd api && $(PYTHON) -m pytest tests/test_line_mac_sync.py tests/test_backup_attachments.py \
-		tests/test_mcp_hosted.py tests/test_restore_points.py -o addopts="" --noconftest -q
+		tests/test_mcp_hosted.py tests/test_restore_points.py tests/test_doctor.py \
+		-o addopts="" --noconftest -q
 
 schedule:
 	bash scripts/launchd/install.sh

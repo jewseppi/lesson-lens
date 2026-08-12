@@ -3,6 +3,18 @@
 Turns exported LINE/chat lesson transcripts into structured study packages:
 lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 
+## Check your setup first
+
+```bash
+make doctor          # config, hosted login, sessions, restore points, MCP, agent command
+make doctor-agent    # ...and actually run your agent command once
+```
+
+`doctor` walks the whole chain and, when something is wrong, prints the fix
+rather than a stack trace ("Nothing is listening at <url> — start the app first",
+"'claude' is not on PATH", and so on). Exit code is 0 only when every required
+check passes, so it can gate a scheduled run.
+
 ## One-touch update from your Mac
 
 If you take lessons over LINE on a Mac, `make update` is the fast path to keep
@@ -71,10 +83,14 @@ library plus `mcp` — no Flask, no provider SDK.
 `make update-agent`. The updater finds every session needing a summary and runs
 your command once per session (`{session_id}` is substituted).
 
+`.env.example` has ready-to-paste presets for Claude Code (`claude -p`), Copilot
+CLI (`copilot -p`), and Codex (`codex exec`) — pick one and uncomment it. Verify
+with `make doctor` (checks the binary resolves) then `make doctor-agent` (runs it
+once for real).
+
 > With `LESSONLENS_AGENT_CMD` unset, agent mode is deliberately **prepare-only**:
-> it reports what needs summarizing and runs nothing. Confirm your CLI's
-> non-interactive flags first, then set it. `--max-sessions` (default 10) caps
-> how many run in one pass.
+> it reports what needs summarizing and runs nothing. `--max-sessions` (default
+> 10) caps how many run in one pass.
 
 ### Restore points (automatic safety net)
 

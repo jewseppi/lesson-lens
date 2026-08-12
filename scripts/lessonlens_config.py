@@ -40,12 +40,14 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def load_env_file(path: Path) -> None:
+def load_env_file(path: Path | str) -> None:
     """Load KEY=VALUE lines from a .env file into os.environ.
 
     Existing environment variables always win, so a shell export overrides the
-    file. Malformed lines and unreadable files are ignored.
+    file. Malformed lines and unreadable files are ignored. Accepts a str or a
+    Path so callers don't have to care.
     """
+    path = Path(path)
     if not path.is_file():
         return
     try:
@@ -143,7 +145,7 @@ def load_config(
     api_url: str | None = None,
     email: str | None = None,
     password: str | None = None,
-    env_file: Path | None = None,
+    env_file: Path | str | None = None,
 ) -> Config:
     """Resolve configuration from explicit args, then environment, then .env.
 
