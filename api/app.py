@@ -149,8 +149,12 @@ def get_db():
 
 
 def _load_latest_completed_run(conn, user_id):
+    # Tie-break on id: created_at has one-second resolution, and a scripted
+    # update can produce two runs inside the same second, which would otherwise
+    # make "the latest run" arbitrary.
     return conn.execute(
-        "SELECT * FROM parse_runs WHERE user_id = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM parse_runs WHERE user_id = ? AND status = 'completed' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
         (user_id,),
     ).fetchone()
 
@@ -4047,6 +4051,19 @@ def upload_attachments():
         if not files:
             return jsonify({"error": "No images provided"}), 400
 
+        # Uploads carry bytes only, so our copy's mtime is always "just now".
+        # Clients may send the original files' mtimes (one ISO string per image,
+        # in the same order) so EXIF-less images still land in the right lesson.
+        source_timestamps = []
+        raw_timestamps = request.form.get("source_timestamps")
+        if raw_timestamps:
+            try:
+                parsed = json.loads(raw_timestamps)
+                if isinstance(parsed, list):
+                    source_timestamps = parsed
+            except (ValueError, TypeError):
+                pass
+
         os.makedirs(ATTACHMENTS_FOLDER, exist_ok=True)
 
         # Load sessions for auto-matching
@@ -4082,14 +4099,29 @@ def upload_attachments():
                 pass
 
         results = []
-        for file in files:
+        for index, file in enumerate(files):
             if not file.filename:
                 continue
 
+            source_timestamp = (
+                source_timestamps[index] if index < len(source_timestamps) else None
+            )
+
             _, ext = os.path.splitext(file.filename)
-            if ext.lower() not in IMAGE_EXTENSIONS:
-                results.append({"filename": file.filename, "error": "unsupported_format"})
-                continue
+            ext = ext.lower()
+            if ext not in IMAGE_EXTENSIONS:
+                # LINE caches media with hashed, extension-less names, so fall
+                # back to magic bytes before rejecting. Without this the macOS
+                # updater finds images and the server silently drops them.
+                from image_helpers import sniff_image_extension
+
+                head = file.stream.read(32)
+                file.stream.seek(0)
+                sniffed = sniff_image_extension(head)
+                if not sniffed:
+                    results.append({"filename": file.filename, "error": "unsupported_format"})
+                    continue
+                ext = sniffed
 
             original_name = secure_filename(file.filename) or "unnamed-image"
             stored_name = f"{uuid.uuid4()}{ext.lower()}"
@@ -4113,9 +4145,13 @@ def upload_attachments():
                 continue
 
             # Extract EXIF metadata
-            exif = extract_exif_datetime(filepath)
+            exif = extract_exif_datetime(filepath, source_timestamp=source_timestamp)
 
-            mime_type = mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+            # Derive from the resolved extension, not the upload name: sniffed
+            # uploads have no extension to guess from.
+            mime_type = (
+                mimetypes.guess_type(f"image{ext}")[0] or "application/octet-stream"
+            )
 
             cursor = conn.execute(
                 """INSERT INTO attachments
@@ -4319,6 +4355,88 @@ def get_session_attachments(session_id):
         } for r in rows]
 
         return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/attachments/rematch", methods=["POST"])
+@jwt_required()
+def rematch_attachments():
+    """Retry auto-matching for attachments that aren't linked to any session.
+
+    Images routinely reach the app before the chat export that explains them —
+    LINE caches a photo the moment it arrives, but the export is taken later. An
+    image uploaded in that gap has no session to match and would otherwise stay
+    unmatched forever, which is exactly the hand-sorting the updater exists to
+    remove. Re-running the match after new sessions land closes that gap.
+    """
+    from image_helpers import match_image_to_sessions
+
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"matched": 0, "candidates": 0, "matches": []}), 200
+
+        sessions = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT session_id, date, start_time, end_time, id
+                   FROM sessions WHERE user_id = ? AND run_id = ?""",
+                (user["id"], run["run_id"]),
+            ).fetchall()
+        ]
+
+        orphans = conn.execute(
+            """SELECT a.id, a.captured_at_local, a.original_filename
+               FROM attachments a
+               LEFT JOIN session_attachments sa
+                 ON a.id = sa.attachment_id AND sa.user_id = a.user_id
+               WHERE a.user_id = ? AND sa.id IS NULL
+               ORDER BY a.id""",
+            (user["id"],),
+        ).fetchall()
+
+        matches = []
+        for att in orphans:
+            # No media-reference fallback here: it guesses at the most recent
+            # session, which across a whole backlog of orphans would dump every
+            # timestamp-less image into one lesson.
+            match = match_image_to_sessions(att["captured_at_local"], sessions)
+            if not match["session_id"]:
+                continue
+            target = next(
+                (s for s in sessions if s["session_id"] == match["session_id"]), None
+            )
+            if not target:
+                continue
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO session_attachments
+                   (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
+                   VALUES (?, ?, ?, ?, ?, 'auto')""",
+                (user["id"], target["id"], att["id"],
+                 match["confidence"], match["reason"]),
+            )
+            if cursor.rowcount:
+                matches.append({
+                    "attachment_id": att["id"],
+                    "filename": att["original_filename"],
+                    "session_id": match["session_id"],
+                    "confidence": match["confidence"],
+                    "reason": match["reason"],
+                })
+        conn.commit()
+
+        return jsonify({
+            "matched": len(matches),
+            "candidates": len(orphans),
+            "matches": matches,
+        }), 200
     finally:
         conn.close()
 

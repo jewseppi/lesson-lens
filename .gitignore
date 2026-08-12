@@ -16,6 +16,9 @@ raw-exports/**
 # Backend runtime data
 api/uploads/**
 api/instance/**
+# Uploaded lesson photos and snapshot archives — user data, never committed
+attachments/**
+backups/**
 api/*.db
 api/*.db-shm
 api/*.db-wal

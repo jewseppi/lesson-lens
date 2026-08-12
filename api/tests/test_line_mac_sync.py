@@ -334,3 +334,64 @@ def test_run_dry_run(tmp_path, capsys):
     assert "dry run" in out
     assert "Would sync export" in out
     assert "Would upload image" in out
+
+
+# --- capture time travels with the bytes -----------------------------------
+
+def test_source_timestamp_for_is_naive_local(tmp_path):
+    """Lesson windows are naive local times, so the stamp must be too."""
+    import datetime as _dt
+
+    path = tmp_path / "photo"
+    path.write_bytes(b"\xff\xd8\xffPHOTO")
+    os.utime(path, (1_754_388_390, 1_754_388_390))
+
+    stamp = m.source_timestamp_for(path)
+    assert stamp == _dt.datetime.fromtimestamp(1_754_388_390).isoformat()
+    assert "+" not in stamp and not stamp.endswith("Z")
+
+
+def test_source_timestamp_for_missing_file(tmp_path):
+    assert m.source_timestamp_for(tmp_path / "gone") is None
+
+
+def test_upload_images_sends_source_timestamps(tmp_path, monkeypatch):
+    """The server's copy is stamped 'now', so the original mtime must be sent."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        if req.full_url.endswith("/api/login"):
+            return _FakeResp({"access_token": "tok"})
+        captured["body"] = req.data
+        captured["content_type"] = req.get_header("Content-type")
+        return _FakeResp({"attachments": [], "uploaded": 0})
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+
+    first = tmp_path / "hashed_a"
+    first.write_bytes(b"\xff\xd8\xffAAA")
+    os.utime(first, (1_754_388_390, 1_754_388_390))
+    second = tmp_path / "hashed_b"
+    second.write_bytes(b"\x89PNG\r\n\x1a\nBBB")
+    os.utime(second, (1_755_000_000, 1_755_000_000))
+
+    client = m.LessonLensClient("https://example.com")
+    client.login("me@example.com", "pw")
+    client.upload_images([first, second], name_hint=m.upload_name_for)
+
+    body = captured["body"].decode("utf-8", "replace")
+    assert 'name="source_timestamps"' in body
+    payload = body.split('name="source_timestamps"')[1]
+    stamps = json.loads(payload.split("\r\n\r\n", 1)[1].split("\r\n--", 1)[0])
+    assert stamps == [
+        m.source_timestamp_for(first),
+        m.source_timestamp_for(second),
+    ]
+    # Order must line up with the files, which the server indexes positionally.
+    assert body.index('filename="hashed_a.jpg"') < body.index('filename="hashed_b.png"')
+
+
+def test_upload_name_for_gives_extensionless_files_a_real_extension(tmp_path):
+    path = tmp_path / "0f3a9c1b2d"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    assert m.upload_name_for(path, path.read_bytes()) == ("0f3a9c1b2d.png", "image/png")

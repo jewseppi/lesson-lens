@@ -51,6 +51,20 @@ images instead:
 python scripts/line_mac_sync.py --images-dir ~/Pictures/line-lessons
 ```
 
+### How images find their lesson
+
+Each image is matched to a session by capture time. LINE strips EXIF from photos
+you *receive*, so the updater sends every file's original modification time
+alongside the bytes — an upload transmits content only, and the server's copy of
+a file is always stamped "just now", which would match nothing.
+
+Images also routinely arrive *before* the chat export that explains them: LINE
+caches a photo the moment it lands, but you take the export later. An image
+uploaded in that gap has no session to match yet, so after a sync that adds new
+sessions the updater re-runs the match (`POST /api/attachments/rematch`) and
+those images fall into place on their own. Anything still unmatched — a photo
+from outside any lesson window — stays in the Unmatched list to assign or ignore.
+
 Prefer clicking to typing? Double-click **`update.command`** in Finder (run
 `chmod +x update.command` once).
 

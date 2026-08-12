@@ -66,7 +66,12 @@ if _SCRIPTS_DIR not in sys.path:
 # The HTTP client and config resolution are shared with the hosted MCP server
 # (api/mcp_server_hosted.py) so there is one implementation of each. They are
 # re-exported here because this module is also the CLI entry point.
-from lessonlens_client import ApiError, LessonLensClient, encode_multipart  # noqa: E402,F401
+from lessonlens_client import (  # noqa: E402,F401
+    ApiError,
+    LessonLensClient,
+    encode_multipart,
+    source_timestamp_for,
+)
 from lessonlens_config import (  # noqa: E402,F401
     TARGET_HOSTED,
     TARGET_LOCAL,
@@ -121,6 +126,29 @@ def is_image_file(path: Path, _cache: dict[str, bool] | None = None) -> bool:
             return sniff_image_type(fh.read(32)) is not None
     except OSError:
         return False
+
+
+_MIME_FOR_KIND = {
+    "jpeg": ("jpg", "image/jpeg"),
+    "png": ("png", "image/png"),
+    "gif": ("gif", "image/gif"),
+    "webp": ("webp", "image/webp"),
+    "heic": ("heic", "image/heic"),
+    "bmp": ("bmp", "image/bmp"),
+}
+
+
+def upload_name_for(path: Path, data: bytes) -> tuple[str, str]:
+    """Filename + MIME to upload a cached image under.
+
+    LINE stores media with hashed, extension-less names. Sending those verbatim
+    gets them rejected as an unsupported format, so derive both from the actual
+    magic bytes and keep the original name as the stem for traceability.
+    """
+    kind = sniff_image_type(data[:32])
+    ext, mime = _MIME_FOR_KIND.get(kind or "", ("jpg", "image/jpeg"))
+    stem = Path(path).stem or "line-image"
+    return f"{stem}.{ext}", mime
 
 
 def file_sha256(path: Path) -> str:
@@ -586,7 +614,9 @@ def run(args: argparse.Namespace) -> int:
         for start in range(0, len(new_images), max(1, args.batch_size)):
             batch = new_images[start : start + max(1, args.batch_size)]
             try:
-                result = client.upload_images([p for p, _ in batch])
+                result = client.upload_images(
+                    [p for p, _ in batch], name_hint=upload_name_for
+                )
             except ApiError as exc:
                 _log(f"ERROR uploading images (batch at {start}): {exc}")
                 break
@@ -611,6 +641,24 @@ def run(args: argparse.Namespace) -> int:
         save_state(state_file, state)
         summary["images"] = {"uploaded": uploaded, "auto_matched": matched}
         _log(f"Uploaded images: {summary['images']}")
+
+    # --- Re-match orphaned images ---
+    # LINE caches a photo the moment it arrives, but the chat export that
+    # explains it is taken later. Images uploaded in that gap had no session to
+    # match; now that this run may have added some, give them another chance.
+    chat_summary = summary.get("chat") or {}
+    if isinstance(chat_summary, dict) and chat_summary.get("new_sessions"):
+        try:
+            rematch = client.rematch_attachments()
+            if rematch.get("matched"):
+                summary["rematched"] = rematch["matched"]
+                _log(
+                    f"Re-matched {rematch['matched']} previously unmatched image(s) "
+                    f"of {rematch.get('candidates', 0)} candidate(s)."
+                )
+        except ApiError as exc:
+            # Older servers won't have the endpoint; never fail the run over it.
+            _log(f"NOTE: re-match skipped ({exc}).")
 
     # --- Generate ---
     if not args.sync_only:

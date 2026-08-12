@@ -14,13 +14,28 @@ import mimetypes
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 __all__ = [
     "ApiError",
     "LessonLensClient",
     "encode_multipart",
+    "source_timestamp_for",
 ]
+
+
+def source_timestamp_for(path: Path) -> str | None:
+    """Return a file's mtime as a naive *local* ISO string, or None.
+
+    Naive local, not UTC: lesson windows are local wall-clock times, so an
+    aware/UTC stamp would shift every photo out of its lesson for anyone not
+    living on UTC.
+    """
+    try:
+        return datetime.fromtimestamp(Path(path).stat().st_mtime).isoformat()
+    except OSError:
+        return None
 
 
 class ApiError(RuntimeError):
@@ -184,18 +199,43 @@ class LessonLensClient:
             "POST", "/api/sync", headers={"Content-Type": content_type}, data=body
         )
 
-    def upload_images(self, image_paths: list[Path]) -> dict:
+    def upload_images(self, image_paths, name_hint=None) -> dict:
+        """Upload images.
+
+        ``name_hint(path, data) -> (filename, mime)`` lets the caller supply a
+        filename with a real extension. LINE caches media with hashed,
+        extension-less names, and sending those verbatim gets them rejected.
+
+        Each file's modification time travels alongside it as
+        ``source_timestamps``. Only bytes cross the wire, so the server's copy
+        is always stamped "now" — and LINE strips EXIF from received photos, so
+        without this the server has no capture time to match against a lesson.
+        """
         files = []
+        timestamps: list[str | None] = []
         for p in image_paths:
-            mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-            files.append(("images", p.name, p.read_bytes(), mime))
-        content_type, body = encode_multipart({}, files)
+            p = Path(p)
+            data = p.read_bytes()
+            if name_hint:
+                filename, mime = name_hint(p, data)
+            else:
+                filename = p.name
+                mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+            files.append(("images", filename, data, mime))
+            timestamps.append(source_timestamp_for(p))
+        content_type, body = encode_multipart(
+            {"source_timestamps": json.dumps(timestamps)}, files
+        )
         return self._request(
             "POST",
             "/api/attachments/upload",
             headers={"Content-Type": content_type},
             data=body,
         )
+
+    def rematch_attachments(self) -> dict:
+        """Retry auto-matching for attachments not yet linked to a session."""
+        return self._post_json("/api/attachments/rematch", {})
 
     def sync_remote(
         self,

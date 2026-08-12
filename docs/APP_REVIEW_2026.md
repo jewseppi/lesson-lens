@@ -212,6 +212,43 @@ newest row. Restoring deletes nothing, so it is itself undoable. The UI is a
   auth. Now `--remote-email` / `--remote-password` / `LESSONLENS_REMOTE_*`, still
   falling back to the local values when they match.
 
+### Image ingestion fixes, found by running it end-to-end
+
+The image path was written but had never been exercised against a real LINE
+cache. Standing a local instance up and driving the full updater against a
+generated export surfaced four defects, each of which alone silently discarded
+images:
+
+- **Extension-less uploads were rejected.** LINE stores media under hashed names
+  with no extension; `upload_attachments` gated on extension alone, so the
+  updater reported "3 images found" and the server accepted zero. The server now
+  falls back to magic bytes, and the client sends a filename carrying the sniffed
+  extension.
+- **Capture time was lost in transit.** An upload carries bytes only, so the
+  server's copy always has an mtime of "just now". LINE strips EXIF from photos
+  you *receive*, so `extract_exif_datetime` fell back to that useless mtime and
+  no image ever landed inside a session window. The client now sends each file's
+  original mtime as `source_timestamps`, and the server prefers it over its own
+  copy's.
+- **`captured_at_local` was stamped in UTC** on the mtime path, while session
+  windows are naive *local* times. In Tokyo that shifts every photo nine hours
+  out of its lesson. Now local wall-clock, with UTC kept separately.
+- **Images that arrived before their lesson stayed orphaned forever.** LINE
+  caches a photo on arrival; the export comes later. There was no path back —
+  the only remedy was assigning by hand, which is the work being automated. New
+  `POST /api/attachments/rematch` retries unmatched attachments, and the updater
+  calls it after any sync that added sessions.
+
+Also fixed while in there: `_load_latest_completed_run` ordered by `created_at`
+alone, which has one-second resolution — two syncs in the same second made "the
+latest run" arbitrary. Now tie-broken on `id`.
+
+Verified end-to-end against a local instance with two lessons and three
+extension-less, EXIF-less images, in the order that actually occurs (images
+first, the second lesson's export later): all three matched their correct lesson
+at `high` confidence, the orphan resolving on the re-match pass, with the
+pre-sync restore point carrying its images.
+
 ## Automation added (this branch)
 
 - **Backlog fill on Opus 5**: `make update-all` syncs and then generates every
