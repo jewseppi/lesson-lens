@@ -149,8 +149,12 @@ def get_db():
 
 
 def _load_latest_completed_run(conn, user_id):
+    # Tie-break on id: created_at has one-second resolution, and a scripted
+    # update can produce two runs inside the same second, which would otherwise
+    # make "the latest run" arbitrary.
     return conn.execute(
-        "SELECT * FROM parse_runs WHERE user_id = ? AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM parse_runs WHERE user_id = ? AND status = 'completed' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
         (user_id,),
     ).fetchone()
 
@@ -236,7 +240,11 @@ def _load_generator_config(provider_override=None, model_override=None):
     elif use_provider == "openai_compatible_local":
         use_model = os.environ.get("LOCAL_OAI_MODEL") or local_defaults.get("openai_compatible_local_model", "local-model")
     else:
-        use_model = gen_defaults.get("default_model", "gpt-4o")
+        provider_models = gen_defaults.get("provider_models", {})
+        use_model = (
+            provider_models.get(use_provider)
+            or gen_defaults.get("default_model", "gpt-5.6")
+        )
 
     temperature = gen_defaults.get("temperature", 0.3)
 
@@ -829,6 +837,21 @@ def init_db():
             UNIQUE(session_id, attachment_id)
         );
 
+        -- Automatic pre-mutation snapshots (see api/restore_points.py).
+        CREATE TABLE IF NOT EXISTS restore_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            session_count INTEGER DEFAULT 0,
+            summary_count INTEGER DEFAULT 0,
+            attachment_count INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
         CREATE TABLE IF NOT EXISTS generation_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1097,11 +1120,58 @@ def _delete_user_learning_data(conn, user_id):
     conn.execute("DELETE FROM uploads WHERE user_id = ?", (user_id,))
 
 
-def _normalize_backup_member(name):
-    normalized = name.replace("\\", "/").lstrip("/")
-    if not normalized or normalized.startswith("../") or "/../" in normalized:
-        raise ValueError("Backup contains an invalid file path")
-    return normalized
+from backup_helpers import (  # noqa: E402
+    BACKUP_SCHEMA_VERSION,
+    SUPPORTED_BACKUP_SCHEMAS,
+    attachment_archive_members,
+    attachment_manifest_entries,
+    load_backup_attachments as _load_backup_attachments,
+    normalize_member as _normalize_backup_member,
+    restore_backup_attachments as _restore_backup_attachments_impl,
+)
+import restore_points as _restore_points  # noqa: E402
+
+RESTORE_POINTS_FOLDER = str(ROOT_DIR / "backups" / "restore-points")
+
+
+def _capture_restore_point(conn, user_id, reason):
+    """Snapshot the user's data before a mutating operation.
+
+    Best effort by design: a brand new account has nothing to snapshot, and a
+    snapshot failure must never turn a working sync into a failed one. Returns
+    the created restore point dict, or None when nothing was captured.
+    """
+    try:
+        user_row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user_row:
+            return None
+        archive_bytes, _filename, manifest = _build_backup_archive(conn, user_row)
+    except ValueError:
+        # "No parsed data to export" — nothing to protect yet.
+        return None
+    except Exception:
+        app.logger.exception("Restore point capture failed for user %s", user_id)
+        return None
+
+    try:
+        _restore_points.prune_restore_points(conn, RESTORE_POINTS_FOLDER)
+        created = _restore_points.create_restore_point(
+            conn, user_id, reason, archive_bytes, RESTORE_POINTS_FOLDER, manifest=manifest,
+        )
+        # Age alone doesn't bound disk use once images are in the archives.
+        _restore_points.enforce_max_points(conn, user_id, RESTORE_POINTS_FOLDER)
+        conn.commit()
+        return created
+    except Exception:
+        app.logger.exception("Restore point write failed for user %s", user_id)
+        return None
+
+
+def _restore_backup_attachments(conn, archive, manifest, user_id):
+    """Restore backup attachments into this instance's attachments folder."""
+    return _restore_backup_attachments_impl(
+        conn, archive, manifest, user_id, ATTACHMENTS_FOLDER
+    )
 
 
 def _read_backup_json(zip_file, name):
@@ -1120,9 +1190,11 @@ def _write_backup_member(destination_root, member_name, data):
     destination.write_bytes(data)
 
 
-def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
-    return {
-        "schema_version": "lessonlens-backup.v1",
+def _build_backup_manifest(user, run, upload, sessions_payload, summaries,
+                           attachment_rows=None, link_rows=None):
+    manifest = {
+        # v2 adds attachments. Importers treat a missing "attachments" key as v1.
+        "schema_version": BACKUP_SCHEMA_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "source_user": {
             "email": user["email"],
@@ -1154,6 +1226,10 @@ def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
             for row in summaries
         ],
     }
+    # Attachments are keyed by sha256 / session-id string so they survive the
+    # trip to an instance with different autoincrement ids.
+    manifest.update(attachment_manifest_entries(attachment_rows, link_rows))
+    return manifest
 
 
 def _build_backup_archive(conn, user):
@@ -1173,7 +1249,10 @@ def _build_backup_archive(conn, user):
         (user["id"], run["run_id"]),
     ).fetchall()
 
-    manifest = _build_backup_manifest(user, run, upload, sessions_payload, summaries)
+    attachment_rows, link_rows = _load_backup_attachments(conn, user["id"])
+    manifest = _build_backup_manifest(
+        user, run, upload, sessions_payload, summaries, attachment_rows, link_rows
+    )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -1194,6 +1273,11 @@ def _build_backup_archive(conn, user):
                 f"summaries/{summary['session_id']}.json",
                 json.dumps(json.loads(summary["lesson_data_json"]), ensure_ascii=False, indent=2),
             )
+
+        # Image blobs, named by sha256 so the import side can match them to the
+        # manifest rows regardless of the source instance's stored filenames.
+        for member_name, blob in attachment_archive_members(attachment_rows, ATTACHMENTS_FOLDER):
+            archive.writestr(member_name, blob)
 
     buffer.seek(0)
     filename = f"lessonlens-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
@@ -1603,7 +1687,9 @@ def _validate_backup_zip(raw_zip):
         archive.close()
         return None, str(exc)
 
-    if manifest.get("schema_version") != "lessonlens-backup.v1":
+    # v2 adds attachments; v1 archives remain importable (they simply carry no
+    # "attachments" key, and the attachment restore step becomes a no-op).
+    if manifest.get("schema_version") not in SUPPORTED_BACKUP_SCHEMAS:
         archive.close()
         return None, "Unsupported backup schema"
 
@@ -1690,6 +1776,110 @@ def preview_backup_import():
         conn.close()
 
 
+@app.route("/api/restore-points", methods=["GET"])
+@jwt_required()
+def list_restore_points_route():
+    """Snapshots taken automatically before sync/import/re-parse."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        # Drop anything past its retention window before reporting.
+        removed = _restore_points.prune_restore_points(conn, RESTORE_POINTS_FOLDER)
+        if removed:
+            conn.commit()
+        return jsonify({
+            "restore_points": _restore_points.list_restore_points(conn, user["id"]),
+            "retention_days": _restore_points.retention_days(),
+        }), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/restore-points/<int:restore_point_id>/download", methods=["GET"])
+@jwt_required()
+def download_restore_point(restore_point_id):
+    """Download a snapshot as an ordinary backup .zip."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        row = _restore_points.get_restore_point(conn, user["id"], restore_point_id)
+        if not row:
+            return jsonify({"error": "Restore point not found"}), 404
+        try:
+            data = _restore_points.read_restore_point_bytes(row, RESTORE_POINTS_FOLDER)
+        except OSError:
+            return jsonify({"error": "Restore point file is missing"}), 410
+        return send_file(
+            io.BytesIO(data),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=row["filename"],
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/restore-points/<int:restore_point_id>/rollback", methods=["POST"])
+@jwt_required()
+def rollback_restore_point(restore_point_id):
+    """Roll the user's data back to a snapshot.
+
+    Takes a fresh snapshot of the *current* state first, so a rollback is itself
+    undoable, then replays the chosen archive through the normal import path
+    with replace_existing semantics.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        row = _restore_points.get_restore_point(conn, user["id"], restore_point_id)
+        if not row:
+            return jsonify({"error": "Restore point not found"}), 404
+        try:
+            data = _restore_points.read_restore_point_bytes(row, RESTORE_POINTS_FOLDER)
+        except OSError:
+            return jsonify({"error": "Restore point file is missing"}), 410
+
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_ROLLBACK)
+    finally:
+        conn.close()
+
+    # _import_backup_bytes opens its own connection; the safety snapshot above is
+    # already committed, so a failure here still leaves the pre-rollback state
+    # recorded as a restore point.
+    return _import_backup_bytes(
+        data, True, email, capture_restore_point=False,
+    )
+
+
+@app.route("/api/restore-points/<int:restore_point_id>", methods=["DELETE"])
+@jwt_required()
+def delete_restore_point_route(restore_point_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not _restore_points.delete_restore_point(
+            conn, user["id"], restore_point_id, RESTORE_POINTS_FOLDER
+        ):
+            return jsonify({"error": "Restore point not found"}), 404
+        conn.commit()
+        return jsonify({"message": "Restore point deleted"}), 200
+    finally:
+        conn.close()
+
+
 @app.route("/api/backup/import", methods=["POST"])
 @jwt_required()
 def import_backup():
@@ -1704,6 +1894,20 @@ def import_backup():
         return jsonify({"error": "No backup file selected"}), 400
 
     raw_zip = uploaded.read()
+    return _import_backup_bytes(raw_zip, replace_existing, email, capture_restore_point=True)
+
+
+def _import_backup_bytes(raw_zip, replace_existing, email, *,
+                         capture_restore_point=True,
+                         restore_point_reason=None):
+    """Import a backup archive.
+
+    Shared by ``POST /api/backup/import`` and restore-point rollback, so both go
+    through exactly one import implementation. When ``capture_restore_point`` is
+    set, the caller's current data is snapshotted first — importing with
+    ``replace_existing`` deletes learning data, so this is the operation the
+    safety net matters most for.
+    """
     result = _validate_backup_zip(raw_zip)
     parsed, error = result
     if error:
@@ -1717,6 +1921,13 @@ def import_backup():
         if not user:
             archive.close()
             return jsonify({"error": "User not found"}), 404
+
+        if capture_restore_point:
+            _capture_restore_point(
+                conn,
+                user["id"],
+                restore_point_reason or _restore_points.REASON_IMPORT,
+            )
 
         with archive:
             if replace_existing:
@@ -1898,11 +2109,17 @@ def import_backup():
                 )
                 imported_summaries += 1
 
+            imported_attachments, linked_attachments = _restore_backup_attachments(
+                conn, archive, manifest, user["id"]
+            )
+            conn.commit()
+
             _track_event(conn, user["id"], "import_backup", {
                 "session_count": session_count,
                 "summary_count": imported_summaries,
                 "skipped_session_count": skipped_session_count,
                 "skipped_summary_count": skipped_summary_count,
+                "attachment_count": imported_attachments,
                 "replace_existing": replace_existing,
             })
 
@@ -1912,6 +2129,8 @@ def import_backup():
                 "summary_count": imported_summaries,
                 "skipped_session_count": skipped_session_count,
                 "skipped_summary_count": skipped_summary_count,
+                "attachment_count": imported_attachments,
+                "attachment_link_count": linked_attachments,
                 "replace_existing": replace_existing,
             }), 201
     except ValueError as exc:
@@ -2236,6 +2455,12 @@ def sync_file():
             conn.commit()
             upload_id = cursor.lastrowid
 
+        # Snapshot only once we know this sync will actually change something.
+        # Deliberately placed after the duplicate-file no-op above: re-syncing an
+        # unchanged export is the common case for the scheduled updater, and
+        # snapshotting it would write a full archive (images included) every run.
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_SYNC)
+
         # Parse the new file
         import sys as _sys
         scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
@@ -2518,6 +2743,110 @@ def get_summary(session_id):
         lesson_data = json.loads(summary["lesson_data_json"])
         _track_event(conn, user["id"], "view_summary", {"session_id": session_id})
         return jsonify(lesson_data)
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/summary/versions", methods=["GET"])
+@jwt_required()
+def list_summary_versions(session_id):
+    """Previous versions of a session's summary.
+
+    Summaries are append-only — ``_store_lesson_summary`` INSERTs and reads take
+    the newest row — so every regeneration or agent write already leaves the
+    prior version behind. This exposes that history so a bad summary write can be
+    undone without restoring a whole snapshot.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        rows = conn.execute(
+            "SELECT id, provider, model, created_at, lesson_data_json"
+            " FROM lesson_summaries WHERE session_id = ? AND user_id = ?"
+            " ORDER BY datetime(created_at) DESC, id DESC",
+            (session_id, user["id"]),
+        ).fetchall()
+
+        versions = []
+        for index, row in enumerate(rows):
+            try:
+                payload = json.loads(row["lesson_data_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            versions.append({
+                "id": row["id"],
+                "provider": row["provider"],
+                "model": row["model"],
+                "created_at": row["created_at"],
+                "is_current": index == 0,
+                "title": payload.get("title", ""),
+                "vocabulary_count": len(payload.get("vocabulary", []) or []),
+                "key_sentence_count": len(payload.get("key_sentences", []) or []),
+            })
+        return jsonify({"session_id": session_id, "versions": versions}), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>/summary/versions/<int:version_id>/restore", methods=["POST"])
+@jwt_required()
+def restore_summary_version(session_id, version_id):
+    """Make an earlier summary version current again.
+
+    Re-inserts the chosen payload as a new newest row rather than deleting the
+    ones after it, so restoring is non-destructive and itself undoable.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        row = conn.execute(
+            "SELECT * FROM lesson_summaries WHERE id = ? AND session_id = ? AND user_id = ?",
+            (version_id, session_id, user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Summary version not found"}), 404
+
+        current = conn.execute(
+            "SELECT id FROM lesson_summaries WHERE session_id = ? AND user_id = ?"
+            " ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (session_id, user["id"]),
+        ).fetchone()
+        if current and current["id"] == version_id:
+            return jsonify({"message": "That version is already current", "version_id": version_id}), 200
+
+        conn.execute(
+            """INSERT INTO lesson_summaries
+               (session_db_id, run_id, session_id, user_id, provider, model, lesson_data_json, output_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["session_db_id"],
+                row["run_id"],
+                row["session_id"],
+                user["id"],
+                f"restored:{row['provider']}",
+                row["model"],
+                row["lesson_data_json"],
+                row["output_dir"],
+            ),
+        )
+        _track_event(conn, user["id"], "restore_summary_version", {
+            "session_id": session_id,
+            "version_id": version_id,
+        })
+        conn.commit()
+        return jsonify({
+            "message": "Summary version restored",
+            "session_id": session_id,
+            "restored_from": version_id,
+        }), 200
     finally:
         conn.close()
 
@@ -3722,6 +4051,19 @@ def upload_attachments():
         if not files:
             return jsonify({"error": "No images provided"}), 400
 
+        # Uploads carry bytes only, so our copy's mtime is always "just now".
+        # Clients may send the original files' mtimes (one ISO string per image,
+        # in the same order) so EXIF-less images still land in the right lesson.
+        source_timestamps = []
+        raw_timestamps = request.form.get("source_timestamps")
+        if raw_timestamps:
+            try:
+                parsed = json.loads(raw_timestamps)
+                if isinstance(parsed, list):
+                    source_timestamps = parsed
+            except (ValueError, TypeError):
+                pass
+
         os.makedirs(ATTACHMENTS_FOLDER, exist_ok=True)
 
         # Load sessions for auto-matching
@@ -3757,14 +4099,29 @@ def upload_attachments():
                 pass
 
         results = []
-        for file in files:
+        for index, file in enumerate(files):
             if not file.filename:
                 continue
 
+            source_timestamp = (
+                source_timestamps[index] if index < len(source_timestamps) else None
+            )
+
             _, ext = os.path.splitext(file.filename)
-            if ext.lower() not in IMAGE_EXTENSIONS:
-                results.append({"filename": file.filename, "error": "unsupported_format"})
-                continue
+            ext = ext.lower()
+            if ext not in IMAGE_EXTENSIONS:
+                # LINE caches media with hashed, extension-less names, so fall
+                # back to magic bytes before rejecting. Without this the macOS
+                # updater finds images and the server silently drops them.
+                from image_helpers import sniff_image_extension
+
+                head = file.stream.read(32)
+                file.stream.seek(0)
+                sniffed = sniff_image_extension(head)
+                if not sniffed:
+                    results.append({"filename": file.filename, "error": "unsupported_format"})
+                    continue
+                ext = sniffed
 
             original_name = secure_filename(file.filename) or "unnamed-image"
             stored_name = f"{uuid.uuid4()}{ext.lower()}"
@@ -3788,9 +4145,13 @@ def upload_attachments():
                 continue
 
             # Extract EXIF metadata
-            exif = extract_exif_datetime(filepath)
+            exif = extract_exif_datetime(filepath, source_timestamp=source_timestamp)
 
-            mime_type = mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+            # Derive from the resolved extension, not the upload name: sniffed
+            # uploads have no extension to guess from.
+            mime_type = (
+                mimetypes.guess_type(f"image{ext}")[0] or "application/octet-stream"
+            )
 
             cursor = conn.execute(
                 """INSERT INTO attachments
@@ -3889,10 +4250,18 @@ def list_attachments():
         attachments = []
         for r in rows:
             # Get session assignments
+            # session_attachments.session_id holds the INTEGER sessions.id (what
+            # the upload path and /api/sessions/<id>/attachments both write and
+            # read). This previously joined on the session *string*, so it
+            # matched nothing and every attachment looked unassigned. The OR
+            # keeps any legacy string-valued rows working; the two forms cannot
+            # collide because session ids are dates, never row ids.
             assignments = conn.execute(
-                """SELECT sa.*, s.date, s.start_time, s.end_time
+                """SELECT sa.*, s.session_id AS session_key, s.date, s.start_time, s.end_time
                    FROM session_attachments sa
-                   JOIN sessions s ON sa.session_id = s.session_id AND sa.user_id = s.user_id
+                   JOIN sessions s
+                     ON (s.id = sa.session_id OR s.session_id = sa.session_id)
+                    AND s.user_id = sa.user_id
                    WHERE sa.attachment_id = ? AND sa.user_id = ?""",
                 (r["id"], user["id"]),
             ).fetchall()
@@ -3905,7 +4274,8 @@ def list_attachments():
                 "captured_at_utc": r["captured_at_utc"],
                 "ingested_at": r["ingested_at"],
                 "sessions": [{
-                    "session_id": a["session_id"],
+                    # Report the session-id string, not the raw row id.
+                    "session_id": a["session_key"],
                     "confidence": a["match_confidence"],
                     "reason": a["match_reason"],
                     "assigned_by": a["assigned_by"],
@@ -3985,6 +4355,88 @@ def get_session_attachments(session_id):
         } for r in rows]
 
         return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/attachments/rematch", methods=["POST"])
+@jwt_required()
+def rematch_attachments():
+    """Retry auto-matching for attachments that aren't linked to any session.
+
+    Images routinely reach the app before the chat export that explains them —
+    LINE caches a photo the moment it arrives, but the export is taken later. An
+    image uploaded in that gap has no session to match and would otherwise stay
+    unmatched forever, which is exactly the hand-sorting the updater exists to
+    remove. Re-running the match after new sessions land closes that gap.
+    """
+    from image_helpers import match_image_to_sessions
+
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"matched": 0, "candidates": 0, "matches": []}), 200
+
+        sessions = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT session_id, date, start_time, end_time, id
+                   FROM sessions WHERE user_id = ? AND run_id = ?""",
+                (user["id"], run["run_id"]),
+            ).fetchall()
+        ]
+
+        orphans = conn.execute(
+            """SELECT a.id, a.captured_at_local, a.original_filename
+               FROM attachments a
+               LEFT JOIN session_attachments sa
+                 ON a.id = sa.attachment_id AND sa.user_id = a.user_id
+               WHERE a.user_id = ? AND sa.id IS NULL
+               ORDER BY a.id""",
+            (user["id"],),
+        ).fetchall()
+
+        matches = []
+        for att in orphans:
+            # No media-reference fallback here: it guesses at the most recent
+            # session, which across a whole backlog of orphans would dump every
+            # timestamp-less image into one lesson.
+            match = match_image_to_sessions(att["captured_at_local"], sessions)
+            if not match["session_id"]:
+                continue
+            target = next(
+                (s for s in sessions if s["session_id"] == match["session_id"]), None
+            )
+            if not target:
+                continue
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO session_attachments
+                   (user_id, session_id, attachment_id, match_confidence, match_reason, assigned_by)
+                   VALUES (?, ?, ?, ?, ?, 'auto')""",
+                (user["id"], target["id"], att["id"],
+                 match["confidence"], match["reason"]),
+            )
+            if cursor.rowcount:
+                matches.append({
+                    "attachment_id": att["id"],
+                    "filename": att["original_filename"],
+                    "session_id": match["session_id"],
+                    "confidence": match["confidence"],
+                    "reason": match["reason"],
+                })
+        conn.commit()
+
+        return jsonify({
+            "matched": len(matches),
+            "candidates": len(orphans),
+            "matches": matches,
+        }), 200
     finally:
         conn.close()
 
@@ -4242,6 +4694,9 @@ def reparse_sessions():
         canonical_run = _load_latest_completed_run(conn, user["id"])
         if not canonical_run:
             return jsonify({"error": "No existing parse run"}), 404
+
+        # Re-parsing rewrites sessions.json and session metadata in place.
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_REPARSE)
 
         # Find the most recent upload file
         upload = conn.execute(

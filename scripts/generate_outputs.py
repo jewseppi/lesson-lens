@@ -671,7 +671,12 @@ def main():
     gen_config = config.get("generation", {})
 
     provider = args.provider or gen_config.get("default_provider", "openai")
-    model = args.model or gen_config.get("default_model", "gpt-4o")
+    provider_models = gen_config.get("provider_models", {})
+    model = (
+        args.model
+        or provider_models.get(provider)
+        or gen_config.get("default_model", "gpt-5.6")
+    )
     temperature = args.temperature if args.temperature is not None else gen_config.get("temperature", 0.3)
     run_id = args.run_id or datetime.now().strftime("%Y-%m-%d_%H%M%S")
 

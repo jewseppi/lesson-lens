@@ -4,6 +4,18 @@ import { apiJson, apiFetch, trackEvent } from '../api';
 import { useFontSize } from '../FontSizeContext';
 import type { LessonSummary, Annotation, AIReview } from '../types';
 
+/** One stored revision of a session's summary (summaries are append-only). */
+type SummaryVersion = {
+  id: number;
+  provider: string;
+  model: string;
+  created_at: string;
+  is_current: boolean;
+  title: string;
+  vocabulary_count: number;
+  key_sentence_count: number;
+};
+
 type Provider = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai_compatible_local';
 const STORAGE_KEY = 'lessonlens-provider';
 const MODEL_KEY_PREFIX = 'lessonlens-model-';
@@ -71,6 +83,40 @@ export default function SummaryPage() {
   const [summaryReview, setSummaryReview] = useState<AIReview | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState('');
+  const [versions, setVersions] = useState<SummaryVersion[]>([]);
+  const [showVersions, setShowVersions] = useState(false);
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
+  const [versionError, setVersionError] = useState('');
+
+  const loadVersions = useCallback(() => {
+    if (!sessionId) return;
+    apiJson<{ versions: SummaryVersion[] }>(`/api/sessions/${sessionId}/summary/versions`)
+      .then(data => setVersions(data.versions ?? []))
+      .catch(() => {});
+  }, [sessionId]);
+
+  const restoreVersion = async (versionId: number) => {
+    if (!sessionId) return;
+    setRestoringVersion(versionId);
+    setVersionError('');
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${sessionId}/summary/versions/${versionId}/restore`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Could not restore that version');
+      }
+      const refreshed = await apiJson<LessonSummary>(`/api/sessions/${sessionId}/summary`);
+      setSummary(refreshed);
+      loadVersions();
+    } catch (err) {
+      setVersionError(err instanceof Error ? err.message : 'Could not restore that version');
+    } finally {
+      setRestoringVersion(null);
+    }
+  };
 
   const loadAnnotations = useCallback(() => {
     if (!sessionId) return;
@@ -89,6 +135,7 @@ export default function SummaryPage() {
       .catch(() => setNoSummary(true))
       .finally(() => setLoading(false));
     loadAnnotations();
+    loadVersions();
     // Load most recent summary review
     apiJson<AIReview[]>(`/api/sessions/${sessionId}/reviews`)
       .then(reviews => {
@@ -96,7 +143,7 @@ export default function SummaryPage() {
         if (summaryReview) setSummaryReview(summaryReview);
       })
       .catch(() => {});
-  }, [sessionId, loadAnnotations]);
+  }, [sessionId, loadAnnotations, loadVersions]);
 
   const triggerSummaryReview = async () => {
     if (!sessionId) return;
@@ -260,6 +307,14 @@ export default function SummaryPage() {
               {annotations.length} annotation{annotations.length !== 1 ? 's' : ''}
             </span>
           )}
+          {versions.length > 1 && (
+            <button
+              onClick={() => setShowVersions(v => !v)}
+              className="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+            >
+              {showVersions ? 'Hide history' : `History (${versions.length})`}
+            </button>
+          )}
           <button
             onClick={triggerSummaryReview}
             disabled={reviewLoading}
@@ -275,6 +330,54 @@ export default function SummaryPage() {
         <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded-lg p-3">
           {reviewError}
         </div>
+      )}
+
+      {showVersions && versions.length > 1 && (
+        <section className="border border-gray-800 rounded-lg p-4 space-y-3 bg-gray-900/40">
+          <div>
+            <h2 className="text-base font-semibold text-white">Summary history</h2>
+            <p className="text-xs text-gray-400 mt-1">
+              Every regeneration keeps the previous version. Restoring makes an older one
+              current again without deleting anything, so it is undoable too.
+            </p>
+          </div>
+          {versionError && (
+            <div className="bg-red-900/50 border border-red-700 text-red-300 text-sm rounded p-2">
+              {versionError}
+            </div>
+          )}
+          <ul className="space-y-2">
+            {versions.map(version => (
+              <li
+                key={version.id}
+                className="flex flex-wrap items-center justify-between gap-2 text-sm border-b border-gray-800 last:border-0 pb-2 last:pb-0"
+              >
+                <div>
+                  <span className="text-gray-200">{version.title || '(untitled)'}</span>
+                  {version.is_current && (
+                    <span className="ml-2 text-xs text-emerald-400 bg-emerald-900/40 px-2 py-0.5 rounded">
+                      current
+                    </span>
+                  )}
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {new Date(version.created_at).toLocaleString()} · {version.provider}
+                    {version.model ? `/${version.model}` : ''} · {version.vocabulary_count} vocab ·{' '}
+                    {version.key_sentence_count} sentences
+                  </div>
+                </div>
+                {!version.is_current && (
+                  <button
+                    onClick={() => void restoreVersion(version.id)}
+                    disabled={restoringVersion !== null}
+                    className="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+                  >
+                    {restoringVersion === version.id ? 'Restoring...' : 'Restore'}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {summaryReview && summaryReview.findings.length > 0 && (

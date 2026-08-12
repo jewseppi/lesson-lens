@@ -52,3 +52,61 @@ Environment requirements for generation:
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` for Gemini
 
 If the user asks for a summary from a newly provided file, do not tell them to run CLI scripts manually. Use the bridge script.
+
+## One-touch hosted update (macOS)
+
+When the user just wants to "update" from their Mac after a LINE lesson — pull
+the latest chat and images into the **hosted** app in one step — prefer the
+one-touch updater over the agent bridge (which targets a local test DB):
+
+```bash
+make update            # or: python scripts/line_mac_sync.py
+```
+
+It reads `LESSONLENS_API_URL` / `LESSONLENS_EMAIL` / `LESSONLENS_PASSWORD`
+(env or repo `.env`), finds the newest LINE export, scans LINE's media cache for
+new images, uploads both, and generates the latest session. Use
+`--images-dir <folder>` if the cache scan yields nothing, `--dry-run` to
+preview, and `--sync-only` to skip generation.
+
+## Which MCP server to use (read this first)
+
+Two servers are configured and **9 of their tool names are identical** —
+including `store_summary`. Picking the wrong one silently writes to the wrong
+database.
+
+| Server | Writes to | Use when |
+| --- | --- | --- |
+| **`lessonlens-hosted`** | the hosted app over HTTP | **Default. Use this unless told otherwise.** |
+| `lessonlens` | a local SQLite file | Only when the user explicitly says they are working locally/offline |
+
+If both are available and the user hasn't said which, use **`lessonlens-hosted`**
+and say so in your first message, so a wrong assumption is visible immediately.
+
+## Generating summaries yourself (preferred — no API key)
+
+When the user asks you to summarize lessons, do the work yourself through the
+**`lessonlens-hosted` MCP server** rather than calling
+`/api/sessions/{id}/generate`. The generate endpoint bills a provider per token;
+you are already paid for. The hosted MCP server talks to the user's remote
+instance directly, so there is no local database to keep in sync.
+
+Workflow:
+
+1. `list_sessions(needs_summary_only=True)` — find what needs doing.
+2. `get_session(session_id)` — read the transcript.
+3. `get_retrieval_context(session_id)` — prior vocabulary/corrections, so new
+   material stays consistent with earlier lessons.
+4. `get_session_attachments(session_id)` — worksheets/whiteboard photos, if any.
+5. `lesson_data_schema()` — the skeleton to fill in.
+6. `store_summary(session_id, lesson_data_json)` — write it back.
+
+Two rules the hosted importer enforces, which `store_summary` checks first and
+will tell you about explicitly:
+
+- `schema_version` must be exactly `"lesson-data.v1"`.
+- `lesson_date` must equal the `session_id`.
+
+If the user is working against a **local** instance instead, use the original
+`lessonlens` MCP server (same tool names, local SQLite) and then
+`make push` to send it up to hosted.

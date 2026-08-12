@@ -13,9 +13,9 @@ const REMOTE_EMAIL_KEY = 'lessonlens-remote-email';
 const SETTINGS_TAB_KEY = 'lessonlens-settings-tab';
 
 const CLOUD_MODEL_DEFAULTS: Record<string, string> = {
-  openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-20250514',
-  gemini: 'gemini-2.0-flash',
+  openai: 'gpt-5.6',
+  anthropic: 'claude-opus-5',
+  gemini: 'gemini-3.6-flash',
 };
 
 function getStoredModel(provider: Provider): string {
@@ -57,6 +57,40 @@ const TABS: { key: SettingsTab; label: string }[] = [
   { key: 'account', label: 'Account' },
   { key: 'agents', label: 'Agents' },
 ];
+
+/** A snapshot taken automatically before a sync/import/re-parse. */
+type RestorePoint = {
+  id: number;
+  reason: string;
+  filename: string;
+  size_bytes: number;
+  session_count: number;
+  summary_count: number;
+  attachment_count: number;
+  created_at: string;
+  expires_at: string;
+  expires_in_days: number | null;
+  expired: boolean;
+};
+
+const RESTORE_REASON_LABELS: Record<string, string> = {
+  'pre-sync': 'Before chat sync',
+  'pre-backup-import': 'Before backup import',
+  'pre-reparse': 'Before re-parse',
+  'pre-rollback': 'Before rollback',
+};
+
+function formatBytes(bytes: number) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatTimestamp(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
 
 function Section({ children }: { children: ReactNode }) {
   return (
@@ -367,6 +401,13 @@ function DataTab({ user }: { user: ReturnType<typeof useAuth>['user'] }) {
   const [confirmReplace, setConfirmReplace] = useState(false);
   const [backupStatus, setBackupStatus] = useState('');
   const [backupError, setBackupError] = useState('');
+  const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
+  const [retentionDays, setRetentionDays] = useState(7);
+  const [loadingRestorePoints, setLoadingRestorePoints] = useState(false);
+  const [rollingBackId, setRollingBackId] = useState<number | null>(null);
+  const [confirmRollbackId, setConfirmRollbackId] = useState<number | null>(null);
+  const [restorePointStatus, setRestorePointStatus] = useState('');
+  const [restorePointError, setRestorePointError] = useState('');
   const [remoteBaseUrl, setRemoteBaseUrl] = useState(() => localStorage.getItem(REMOTE_URL_KEY) || '');
   const [remoteEmail, setRemoteEmail] = useState(() => localStorage.getItem(REMOTE_EMAIL_KEY) || (user?.email ?? ''));
   const [remotePassword, setRemotePassword] = useState('');
@@ -440,6 +481,65 @@ function DataTab({ user }: { user: ReturnType<typeof useAuth>['user'] }) {
       setSessionImportError(err instanceof Error ? err.message : 'Import failed');
     } finally {
       setImportingSummary(false);
+    }
+  };
+
+  const loadRestorePoints = async () => {
+    setLoadingRestorePoints(true);
+    setRestorePointError('');
+    try {
+      const data = (await apiJson('/api/restore-points')) as {
+        restore_points?: RestorePoint[];
+        retention_days?: number;
+      };
+      setRestorePoints(data.restore_points ?? []);
+      if (typeof data.retention_days === 'number') setRetentionDays(data.retention_days);
+    } catch (err) {
+      setRestorePointError(err instanceof Error ? err.message : 'Could not load restore points');
+    } finally {
+      setLoadingRestorePoints(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRestorePoints();
+  }, []);
+
+  const handleRollback = async (id: number) => {
+    setRollingBackId(id);
+    setRestorePointError('');
+    setRestorePointStatus('');
+    try {
+      const res = await apiFetch(`/api/restore-points/${id}/rollback`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Rollback failed');
+      setRestorePointStatus(
+        `Rolled back to the snapshot from ${formatTimestamp(
+          restorePoints.find(p => p.id === id)?.created_at ?? '',
+        )} — ${data.session_count ?? 0} session(s), ${data.summary_count ?? 0} summary(ies) restored. ` +
+        'A snapshot of the previous state was saved first, so this is undoable.',
+      );
+      setConfirmRollbackId(null);
+      await loadRestorePoints();
+    } catch (err) {
+      setRestorePointError(err instanceof Error ? err.message : 'Rollback failed');
+    } finally {
+      setRollingBackId(null);
+    }
+  };
+
+  const handleDeleteRestorePoint = async (id: number) => {
+    setRestorePointError('');
+    setRestorePointStatus('');
+    try {
+      const res = await apiFetch(`/api/restore-points/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Could not delete restore point');
+      }
+      await loadRestorePoints();
+    } catch (err) {
+      setRestorePointError(err instanceof Error ? err.message : 'Could not delete restore point');
     }
   };
 
@@ -588,6 +688,131 @@ function DataTab({ user }: { user: ReturnType<typeof useAuth>['user'] }) {
 
   return (
     <div className="space-y-8">
+      {/* Restore Points */}
+      <Section>
+        <div>
+          <h2 className="text-lg font-semibold text-white">Restore Points</h2>
+          <p className="text-sm text-gray-400 mt-1">
+            A snapshot is saved automatically before every chat sync, backup import, and
+            re-parse. If something goes wrong, roll back here. Snapshots are kept for{' '}
+            {retentionDays} days and then deleted automatically.
+          </p>
+        </div>
+
+        {restorePointStatus && (
+          <div className="bg-emerald-900/40 border border-emerald-700 text-emerald-200 text-sm rounded-lg px-4 py-3">
+            {restorePointStatus}
+          </div>
+        )}
+        {restorePointError && (
+          <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded-lg px-4 py-3">
+            {restorePointError}
+          </div>
+        )}
+
+        {loadingRestorePoints ? (
+          <p className="text-sm text-gray-400">Loading restore points...</p>
+        ) : restorePoints.length === 0 ? (
+          <p className="text-sm text-gray-400">
+            No restore points yet. One will be created the next time you sync or import.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {restorePoints.map(point => (
+              <div
+                key={point.id}
+                className="border border-gray-800 rounded-lg p-4 space-y-3 bg-gray-900/40"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">
+                      {RESTORE_REASON_LABELS[point.reason] ?? point.reason}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {formatTimestamp(point.created_at)} · {point.session_count} session(s) ·{' '}
+                      {point.summary_count} summary(ies) · {point.attachment_count} image(s) ·{' '}
+                      {formatBytes(point.size_bytes)}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {point.expired
+                        ? 'Expired — will be removed shortly'
+                        : `Expires in ${point.expires_in_days ?? 0} day(s)`}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href={`/api/restore-points/${point.id}/download`}
+                      onClick={e => {
+                        // apiFetch attaches the auth header; a plain link cannot.
+                        e.preventDefault();
+                        void (async () => {
+                          const res = await apiFetch(`/api/restore-points/${point.id}/download`);
+                          if (!res.ok) {
+                            setRestorePointError('Could not download this restore point.');
+                            return;
+                          }
+                          const blob = await res.blob();
+                          const url = window.URL.createObjectURL(blob);
+                          const link = document.createElement('a');
+                          link.href = url;
+                          link.download = point.filename;
+                          document.body.appendChild(link);
+                          link.click();
+                          link.remove();
+                          window.URL.revokeObjectURL(url);
+                        })();
+                      }}
+                      className="text-sm bg-gray-800 hover:bg-gray-700 text-white px-3 py-2 rounded-lg transition-colors"
+                    >
+                      Download
+                    </a>
+                    <button
+                      onClick={() => setConfirmRollbackId(point.id)}
+                      disabled={rollingBackId !== null}
+                      className="text-sm bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-3 py-2 rounded-lg font-medium transition-colors"
+                    >
+                      {rollingBackId === point.id ? 'Rolling back...' : 'Roll Back'}
+                    </button>
+                    <button
+                      onClick={() => void handleDeleteRestorePoint(point.id)}
+                      disabled={rollingBackId !== null}
+                      className="text-sm bg-gray-800 hover:bg-red-800 disabled:opacity-50 text-gray-300 px-3 py-2 rounded-lg transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+
+                {confirmRollbackId === point.id && (
+                  <div className="border-t border-gray-800 pt-3 space-y-3">
+                    <p className="text-sm text-amber-200">
+                      Roll back to this snapshot? Your current sessions and summaries will be
+                      replaced by the ones in it. A snapshot of the current state is saved
+                      first, so you can undo this too.
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => void handleRollback(point.id)}
+                        disabled={rollingBackId !== null}
+                        className="text-sm bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+                      >
+                        Yes, roll back
+                      </button>
+                      <button
+                        onClick={() => setConfirmRollbackId(null)}
+                        className="text-sm bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
       {/* Backup and Restore */}
       <Section>
         <div>

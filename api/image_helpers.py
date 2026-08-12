@@ -19,6 +19,31 @@ def is_image_file(filename):
     return ext.lower() in IMAGE_EXTENSIONS
 
 
+# Magic-byte signatures, so extension-less uploads still work. LINE stores media
+# with hashed names and no extension, so rejecting on extension alone silently
+# discarded every image the macOS updater found.
+def sniff_image_extension(header):
+    """Return a canonical extension ('.jpg', '.png', ...) for image bytes, else None."""
+    if not header:
+        return None
+    if header[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if header[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if header[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if len(header) >= 14 and header[:2] == b"BM":
+        return ".bmp"
+    if len(header) >= 12:
+        if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+            return ".webp"
+        if header[4:8] == b"ftyp" and header[8:12] in (
+            b"heic", b"heix", b"heif", b"mif1", b"hevc", b"hevx",
+        ):
+            return ".heic"
+    return None
+
+
 def compute_file_hash(filepath):
     """SHA-256 hash of a file."""
     h = hashlib.sha256()
@@ -28,16 +53,25 @@ def compute_file_hash(filepath):
     return h.hexdigest()
 
 
-def extract_exif_datetime(filepath):
+def extract_exif_datetime(filepath, source_timestamp=None):
     """
     Extract capture timestamp from image EXIF data.
+
+    Args:
+        filepath: path to the image on this machine
+        source_timestamp: optional ISO string for when the *original* file was
+            written, supplied by an uploading client. An upload transmits bytes
+            only, so the server's copy always has an mtime of "just now" — for
+            images without EXIF (LINE strips it from received photos) that is
+            useless for session matching. When given, this is preferred over the
+            local mtime.
 
     Returns dict with:
       - captured_at_local: ISO string of local capture time (or None)
       - timezone_hint: EXIF timezone offset if available (or None)
       - captured_at_utc: ISO string of UTC capture time (or None)
       - metadata_json: dict of selected EXIF fields
-      - source: 'exif', 'filename', 'mtime', or None
+      - source: 'exif', 'filename', 'source_mtime', 'mtime', or None
     """
     result = {
         "captured_at_local": None,
@@ -101,18 +135,48 @@ def extract_exif_datetime(filepath):
             result["captured_at_local"] = dt.isoformat()
             result["source"] = "filename"
 
-    # Fallback: filesystem mtime
+    # Fallback: mtime of the original file, as reported by the uploading client
+    if not result["captured_at_local"] and source_timestamp:
+        dt = _parse_iso(source_timestamp)
+        if dt:
+            result["captured_at_local"] = _naive_local(dt).isoformat()
+            if dt.tzinfo is not None:
+                result["captured_at_utc"] = dt.astimezone(timezone.utc).isoformat()
+            result["source"] = "source_mtime"
+
+    # Fallback: filesystem mtime of our own copy
     if not result["captured_at_local"]:
         try:
             mtime = os.path.getmtime(filepath)
-            dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-            result["captured_at_local"] = dt.isoformat()
-            result["captured_at_utc"] = dt.isoformat()
+            # captured_at_local must be *local* wall-clock: session windows are
+            # naive local times, so stamping UTC here means images never match
+            # for anyone outside UTC.
+            result["captured_at_local"] = datetime.fromtimestamp(mtime).isoformat()
+            result["captured_at_utc"] = datetime.fromtimestamp(
+                mtime, tz=timezone.utc
+            ).isoformat()
             result["source"] = "mtime"
         except OSError:
             pass
 
     return result
+
+
+def _parse_iso(value):
+    """Parse an ISO-8601 string leniently; return None if it isn't one."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _naive_local(dt):
+    """Drop tzinfo, converting to this machine's local time first if aware."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone().replace(tzinfo=None)
 
 
 def _parse_filename_timestamp(filename):

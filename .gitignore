@@ -16,6 +16,9 @@ raw-exports/**
 # Backend runtime data
 api/uploads/**
 api/instance/**
+# Uploaded lesson photos and snapshot archives — user data, never committed
+attachments/**
+backups/**
 api/*.db
 api/*.db-shm
 api/*.db-wal
@@ -39,6 +42,13 @@ web/dist/
 # Environment
 .env
 .env.local
+
+# Local updater state / logs
+logs/
+.lessonlens/
+
+# Automatic pre-sync snapshots (api/restore_points.py)
+backups/
 
 # Test artifacts
 .coverage

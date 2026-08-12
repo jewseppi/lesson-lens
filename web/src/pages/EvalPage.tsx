@@ -522,7 +522,7 @@ function PoliciesTab({ policies, onReload, setError }: {
             <div>
               <label className="text-xs text-gray-400 block mb-1">Fallback Model</label>
               <input value={form.fallback_model} onChange={e => setForm({ ...form, fallback_model: e.target.value })}
-                placeholder="e.g. gpt-4o-mini"
+                placeholder="e.g. gpt-5.6"
                 className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white" />
             </div>
           </div>

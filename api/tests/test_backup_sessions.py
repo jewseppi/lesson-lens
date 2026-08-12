@@ -9,6 +9,7 @@ import zipfile
 
 import pytest
 
+import backup_helpers
 from tests.conftest import auth_header, ADMIN_EMAIL, ADMIN_PASSWORD
 
 
@@ -141,7 +142,8 @@ class TestBackupExportWithData:
         assert "parse/sessions.json" in names
 
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        assert manifest["schema_version"] == "lessonlens-backup.v1"
+        assert manifest["schema_version"] in backup_helpers.SUPPORTED_BACKUP_SCHEMAS
+        assert manifest["schema_version"] == backup_helpers.BACKUP_SCHEMA_VERSION
         assert manifest["source_user"]["email"] == ADMIN_EMAIL
 
 
