@@ -2024,7 +2024,14 @@ def _import_backup_bytes(raw_zip, replace_existing, email, *,
                 ),
             )
 
+            # new_sessions is already filtered against existing_session_ids above
+            # (and replace mode empties it after deleting), so the only case left
+            # is an archive that repeats a session_id within itself.
+            seen_ids = set(existing_session_ids)
             for session in new_sessions:
+                if session["session_id"] in seen_ids:
+                    continue
+                seen_ids.add(session["session_id"])
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, user_id, session_id, date, start_time, end_time,
@@ -2307,7 +2314,18 @@ def parse_upload(upload_id):
              output_dir, datetime.now(timezone.utc).isoformat()),
         )
 
-        # Insert session records (skip empty sessions)
+        # Insert session records (skip empty sessions).
+        #
+        # Do NOT skip session_ids that already exist from an earlier run. It is
+        # the obvious fix for the duplicate rows this leaves behind, and it is
+        # wrong: `list_sessions` scopes to the *latest* run
+        # (`WHERE s.run_id = ?`), so a session skipped here stays stranded under
+        # the previous run id and vanishes from the UI. Since LINE exports are
+        # cumulative, re-parsing one would empty the sessions page entirely.
+        # Re-pointing old rows at the new run is not a fix either: summaries
+        # join on (session_id, run_id), so they would silently unlink.
+        # The duplicates are invisible to the UI and cost only table rows;
+        # `/api/sync` avoids them properly by merging into the canonical run.
         inserted_sessions = 0
         for sess in result["sessions"]:
             if sess["message_count"] == 0:
@@ -4284,6 +4302,64 @@ def list_attachments():
             })
 
         return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+@jwt_required()
+def delete_session(session_id):
+    """Delete a session and everything hanging off it.
+
+    Snapshots first: this drops the session, its attachment links, summaries,
+    annotations, and retrieval items in one shot, and it is reachable from a
+    button in the UI. A restore point makes it undoable from Settings.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No completed parse run"}), 404
+
+        # sessions.run_id holds the run-id *string*, not parse_runs.id — and
+        # scope by user_id rather than trusting the run join alone.
+        sess = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ? AND run_id = ? AND user_id = ?",
+            (session_id, run["run_id"], user["id"]),
+        ).fetchone()
+        if not sess:
+            return jsonify({"error": "Session not found"}), 404
+
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_DELETE_SESSION)
+
+        sess_int_id = sess["id"]
+        conn.execute(
+            "DELETE FROM session_attachments WHERE session_id = ? AND user_id = ?",
+            (sess_int_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM user_retrieval_items WHERE user_id = ? AND session_id = ?",
+            (user["id"], session_id),
+        )
+        conn.execute(
+            "DELETE FROM lesson_summaries WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM annotations WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ? AND user_id = ?",
+            (sess_int_id, user["id"]),
+        )
+        conn.commit()
+        return jsonify({"deleted": True})
     finally:
         conn.close()
 

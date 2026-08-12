@@ -41,6 +41,7 @@ REASON_SYNC = "pre-sync"
 REASON_IMPORT = "pre-backup-import"
 REASON_REPARSE = "pre-reparse"
 REASON_ROLLBACK = "pre-rollback"
+REASON_DELETE_SESSION = "pre-session-delete"
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
