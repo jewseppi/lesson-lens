@@ -247,3 +247,49 @@ export interface ReparseResult {
   auto_unarchived?: number;
   user_overrides_applied?: number;
 }
+
+export type ReviewItemType = 'correction' | 'key_sentence' | 'vocab';
+
+export interface ReviewItem {
+  item_key: string;
+  item_type: ReviewItemType;
+  session_id: string;
+  data: Record<string, string>;
+  due_at: string | null;
+  streak: number;
+  is_new: boolean;
+}
+
+export interface ReviewQueue {
+  items: ReviewItem[];
+  count: number;
+  due_count: number;
+  total_items: number;
+  daily_target: number;
+  streak: number;
+}
+
+export interface ReviewStats {
+  due_count: number;
+  new_count: number;
+  total_items: number;
+  daily_target: number;
+  streak: number;
+  total_reviews: number;
+  last_completed_on: string | null;
+  completed_today: boolean;
+}
+
+export interface ReviewGradeResult {
+  item_key: string;
+  due_at: string;
+  interval_days: number;
+  streak: number;
+}
+
+export interface ReviewCompleteResult {
+  streak: number;
+  daily_target: number;
+  target_increased: boolean;
+  last_completed_on: string;
+}

@@ -182,7 +182,6 @@ function GeneralTab() {
     if (provider === 'ollama' || provider === 'openai_compatible_local') {
       void checkLocalHealth();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
   const handleReparse = async () => {

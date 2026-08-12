@@ -1,35 +1,50 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiJson } from '../api';
-import type { Session, SharedLink, Upload } from '../types';
+import type { ReviewStats, Session, SharedLink, Upload } from '../types';
 
 export default function DashboardPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
+  const [review, setReview] = useState<ReviewStats | null>(null);
   const [loading, setLoading] = useState(true);
+  // Captured when the data loads, not during render: reading the clock while
+  // rendering is impure, and the cutoff logically belongs to the fetch anyway.
+  const [recentCutoff, setRecentCutoff] = useState('');
 
   useEffect(() => {
     Promise.all([
       apiJson<Session[]>('/api/sessions').catch(() => []),
       apiJson<Upload[]>('/api/uploads').catch(() => []),
-    ]).then(([s, u]) => {
+      apiJson<ReviewStats>('/api/review/stats').catch(() => null),
+    ]).then(([s, u, r]) => {
+      setRecentCutoff(new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10));
       setSessions(s);
       setUploads(u);
+      setReview(r);
     }).finally(() => setLoading(false));
   }, []);
 
+  const recentSessions = useMemo(
+    () => sessions
+      .filter(s => !s.is_archived && s.date >= recentCutoff)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time)),
+    [sessions, recentCutoff],
+  );
+
   if (loading) return <div className="text-gray-400">Loading...</div>;
 
-  const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
-  const recentSessions = sessions
-    .filter(s => !s.is_archived && s.date >= twoWeeksAgo)
-    .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time));
   const totalLessons = sessions.filter(s => s.lesson_content_count >= 3).length;
   const summarized = sessions.filter(s => s.has_summary).length;
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Dashboard</h1>
+
+      {/* Daily review — the single entry point. Deliberately above everything
+          else: the app only pays off if this gets opened, and it only gets
+          opened if starting takes one tap and no decisions. */}
+      <ReviewCard stats={review} />
 
       {/* Stats cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -133,6 +148,52 @@ function SharedLinkPanel({ link, compact = false, className = '' }: { link: Shar
           {link.after_text && <div>{link.after_text}</div>}
         </div>
       )}
+    </div>
+  );
+}
+
+function ReviewCard({ stats }: { stats: ReviewStats | null }) {
+  // No stats endpoint (older server) or no material yet — say nothing rather
+  // than showing an empty prompt that can't be acted on.
+  if (!stats || stats.total_items === 0) return null;
+
+  const nothingDue = stats.due_count === 0;
+  const minutes = stats.daily_target <= 8 ? 5 : 10;
+
+  return (
+    <div className="bg-gradient-to-br from-indigo-950/70 to-gray-900 border border-indigo-900/60 rounded-xl p-4 sm:p-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Daily Review</h2>
+            {stats.streak > 0 && (
+              <span className="text-sm text-amber-300">🔥 {stats.streak}</span>
+            )}
+          </div>
+          <p className="text-sm text-gray-400 mt-1">
+            {nothingDue ? (
+              stats.completed_today
+                ? 'Done for today. Nice.'
+                : 'Nothing due — everything is scheduled ahead.'
+            ) : (
+              <>
+                <span className="text-white font-medium">{stats.due_count}</span> due
+                {stats.new_count > 0 && ` · ${stats.new_count} new`}
+                {' · about '}{minutes} min
+              </>
+            )}
+          </p>
+        </div>
+
+        {!nothingDue && (
+          <Link
+            to={`/review?minutes=${minutes}`}
+            className="shrink-0 text-center px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 font-medium transition-colors"
+          >
+            Start review
+          </Link>
+        )}
+      </div>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import SessionsPage from './pages/SessionsPage';
 import SessionDetailPage from './pages/SessionDetailPage';
 import SummaryPage from './pages/SummaryPage';
 import StudyModePage from './pages/StudyModePage';
+import ReviewPage from './pages/ReviewPage';
 import UploadPage from './pages/UploadPage';
 import SettingsPage from './pages/SettingsPage';
 import SetupPage from './pages/SetupPage';
@@ -34,6 +35,7 @@ function AppRoutes() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
+        <Route path="/review" element={<ReviewPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/eval" element={<EvalPage />} />
