@@ -6,6 +6,15 @@
       "env": {
         "LESSONLENS_USER_EMAIL": ""
       }
+    },
+    "lessonlens-hosted": {
+      "command": "python3",
+      "args": ["api/mcp_server_hosted.py"],
+      "env": {
+        "LESSONLENS_API_URL": "",
+        "LESSONLENS_EMAIL": "",
+        "LESSONLENS_PASSWORD": ""
+      }
     }
   }
 }

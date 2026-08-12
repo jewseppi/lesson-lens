@@ -42,6 +42,53 @@ remove it). The one step it can't automate is the LINE export itself — macOS
 LINE has no scripting hook — but a scheduled run harmlessly no-ops until there's
 a new export to pick up.
 
+### Generating with your agent subscription (no API key)
+
+Provider-backed generation bills per token. If you already pay for a coding-agent
+subscription (Claude Code, Copilot, Codex CLI), the agent can author the lesson
+package itself — that path costs nothing extra and needs no API key on the
+server. Two ways to use it:
+
+**1. Drive it interactively.** Point your agent at the hosted MCP server, which
+exposes the same tools as the local one but reads and writes your *hosted*
+instance directly — no local database, no sync-up step:
+
+```jsonc
+// .mcp.json already contains this entry; fill in the env vars (or use .env)
+"lessonlens-hosted": {
+  "command": "python3",
+  "args": ["api/mcp_server_hosted.py"],
+  "env": { "LESSONLENS_API_URL": "", "LESSONLENS_EMAIL": "", "LESSONLENS_PASSWORD": "" }
+}
+```
+
+Then ask your agent: *"list the sessions that need summaries, then write one for
+the newest."* It uses `list_sessions(needs_summary_only=True)` → `get_session` →
+`get_retrieval_context` → `store_summary`. It needs only Python's standard
+library plus `mcp` — no Flask, no provider SDK.
+
+**2. Let the updater invoke it.** Set `LESSONLENS_AGENT_CMD` in `.env` and run
+`make update-agent`. The updater finds every session needing a summary and runs
+your command once per session (`{session_id}` is substituted).
+
+> With `LESSONLENS_AGENT_CMD` unset, agent mode is deliberately **prepare-only**:
+> it reports what needs summarizing and runs nothing. Confirm your CLI's
+> non-interactive flags first, then set it. `--max-sessions` (default 10) caps
+> how many run in one pass.
+
+### If the hosted app isn't reachable
+
+The older local-first flow still works: sync into a local instance, generate
+there, then push up.
+
+```bash
+make update ARGS="--target local"   # sync into a local LessonLens
+make push                           # push local -> hosted via /api/backup/sync-remote
+```
+
+Backups now carry **images** as well as chat and summaries, so the push no longer
+silently drops your lesson photos (it used to).
+
 See [docs/APP_REVIEW_2026.md](docs/APP_REVIEW_2026.md) for the design and the
 wider review of the app's state and gaps.
 

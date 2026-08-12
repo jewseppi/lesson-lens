@@ -51,12 +51,30 @@ import hashlib
 import json
 import mimetypes
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+# The HTTP client and config resolution are shared with the hosted MCP server
+# (api/mcp_server_hosted.py) so there is one implementation of each. They are
+# re-exported here because this module is also the CLI entry point.
+from lessonlens_client import ApiError, LessonLensClient, encode_multipart  # noqa: E402,F401
+from lessonlens_config import (  # noqa: E402,F401
+    TARGET_HOSTED,
+    TARGET_LOCAL,
+    Config,
+    load_config,
+    load_env_file,
+    repo_root,
+)
 
 # ---------------------------------------------------------------------------
 # Image detection — LINE caches media with hashed names and often no extension,
@@ -243,165 +261,86 @@ def save_state(path: Path, state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Minimal multipart/form-data encoder (stdlib only).
+# HTTP client, multipart encoding, and .env loading now live in the shared
+# modules imported at the top of this file (lessonlens_client / lessonlens_config)
+# so the hosted MCP server reuses exactly the same implementations.
 # ---------------------------------------------------------------------------
 
-def encode_multipart(fields: dict[str, str], files: list[tuple[str, str, bytes, str]]):
-    """Return (content_type, body_bytes).
+# ---------------------------------------------------------------------------
+# Generation modes
+# ---------------------------------------------------------------------------
 
-    fields: {name: value}
-    files:  [(field_name, filename, content, mime_type)]
+def resolve_generate_mode(requested: str | None, cfg: Config) -> str:
+    """Decide who generates summaries: 'agent', 'provider', or 'none'.
+
+    Defaults to the subscription agent when one is configured, because that path
+    costs nothing per token; otherwise falls back to provider-backed generation.
     """
-    boundary = f"----lessonlens{uuid.uuid4().hex}"
-    crlf = b"\r\n"
-    parts: list[bytes] = []
-    for name, value in fields.items():
-        parts.append(("--" + boundary).encode())
-        parts.append(f'Content-Disposition: form-data; name="{name}"'.encode())
-        parts.append(b"")
-        parts.append(str(value).encode("utf-8"))
-    for field, filename, content, mime in files:
-        parts.append(("--" + boundary).encode())
-        parts.append(
-            (
-                f'Content-Disposition: form-data; name="{field}"; '
-                f'filename="{filename}"'
-            ).encode("utf-8")
+    if requested:
+        return requested
+    return "agent" if cfg.has_agent_cmd else "provider"
+
+
+def run_agent_generation(client, cfg: Config, max_sessions: int = 10) -> dict:
+    """Generate summaries using the configured subscription-agent CLI.
+
+    With no LESSONLENS_AGENT_CMD configured this is deliberately *prepare only*:
+    it reports which sessions still need a summary and runs nothing. That keeps
+    a misconfigured command from fanning out across the whole backlog, and lets
+    you drive the agent interactively (via the lessonlens-hosted MCP server)
+    instead if you prefer.
+    """
+    sessions = client.list_sessions()
+    pending = [
+        s.get("session_id")
+        for s in sessions
+        if s.get("needs_summary") and s.get("session_id")
+    ]
+
+    if not pending:
+        _log("Generation (agent): every session already has a summary.")
+        return {"mode": "agent", "pending": 0, "ran": 0}
+
+    if not cfg.has_agent_cmd:
+        listed = ", ".join(pending[:10]) + ("..." if len(pending) > 10 else "")
+        _log(
+            f"Generation (agent): {len(pending)} session(s) need a summary: {listed}\n"
+            "  No LESSONLENS_AGENT_CMD configured, so nothing was run.\n"
+            "  Either set it (e.g. LESSONLENS_AGENT_CMD='claude -p \"...{session_id}...\"'),\n"
+            "  or ask your agent to summarize them via the lessonlens-hosted MCP server."
         )
-        parts.append(f"Content-Type: {mime}".encode())
-        parts.append(b"")
-        parts.append(content)
-    parts.append(("--" + boundary + "--").encode())
-    parts.append(b"")
-    body = crlf.join(parts)
-    return f"multipart/form-data; boundary={boundary}", body
+        return {"mode": "agent", "pending": len(pending), "ran": 0, "sessions": pending}
 
+    targets = pending[: max(0, max_sessions)]
+    if len(pending) > len(targets):
+        _log(
+            f"Generation (agent): {len(pending)} pending, running the first "
+            f"{len(targets)} (raise --max-sessions for more)."
+        )
 
-# ---------------------------------------------------------------------------
-# Hosted API client (stdlib urllib).
-# ---------------------------------------------------------------------------
-
-class ApiError(RuntimeError):
-    pass
-
-
-class LessonLensClient:
-    def __init__(self, base_url: str, timeout: int = 120):
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.token: str | None = None
-
-    def _request(self, method: str, path: str, *, headers=None, data=None):
-        url = self.base_url + path
-        req = urllib.request.Request(url, data=data, method=method)
-        for key, value in (headers or {}).items():
-            req.add_header(key, value)
-        if self.token:
-            req.add_header("Authorization", f"Bearer {self.token}")
+    ran, failed = 0, 0
+    for session_id in targets:
+        cmd = cfg.build_agent_command(session_id)
+        _log(f"  agent → {session_id}: {' '.join(cmd)}")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise ApiError(f"{method} {path} failed: HTTP {exc.code} {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise ApiError(f"{method} {path} failed: {exc.reason}") from exc
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"raw": raw.decode("utf-8", "replace")}
+            # No shell: cmd is an argv list, so a session id can't inject commands.
+            result = subprocess.run(cmd, cwd=str(repo_root()), timeout=1800)
+            if result.returncode == 0:
+                ran += 1
+            else:
+                failed += 1
+                _log(f"  agent command exited {result.returncode} for {session_id}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failed += 1
+            _log(f"  agent command failed for {session_id}: {exc}")
 
-    def login(self, email: str, password: str) -> None:
-        body = json.dumps({"email": email, "password": password}).encode("utf-8")
-        result = self._request(
-            "POST", "/api/login", headers={"Content-Type": "application/json"}, data=body
-        )
-        token = result.get("access_token")
-        if not token:
-            raise ApiError(f"Login did not return a token: {result}")
-        self.token = token
-
-    def sync_export(self, path: Path) -> dict:
-        content = path.read_bytes()
-        content_type, body = encode_multipart(
-            {}, [("file", path.name, content, "text/plain")]
-        )
-        return self._request(
-            "POST", "/api/sync", headers={"Content-Type": content_type}, data=body
-        )
-
-    def upload_images(self, image_paths: list[Path]) -> dict:
-        files = []
-        for p in image_paths:
-            mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-            files.append(("images", p.name, p.read_bytes(), mime))
-        content_type, body = encode_multipart({}, files)
-        return self._request(
-            "POST",
-            "/api/attachments/upload",
-            headers={"Content-Type": content_type},
-            data=body,
-        )
-
-    def list_sessions(self) -> list[dict]:
-        result = self._request("GET", "/api/sessions")
-        return result if isinstance(result, list) else result.get("sessions", [])
-
-    def generate(self, session_id: str, provider: str | None, model: str | None) -> dict:
-        payload: dict[str, str] = {}
-        if provider:
-            payload["provider"] = provider
-        if model:
-            payload["model"] = model
-        body = json.dumps(payload).encode("utf-8")
-        return self._request(
-            "POST",
-            f"/api/sessions/{session_id}/generate",
-            headers={"Content-Type": "application/json"},
-            data=body,
-        )
-
-    def generate_all_missing(self, provider: str | None, model: str | None) -> dict:
-        payload: dict[str, str] = {}
-        if provider:
-            payload["provider"] = provider
-        if model:
-            payload["model"] = model
-        body = json.dumps(payload).encode("utf-8")
-        return self._request(
-            "POST",
-            "/api/summaries/generate",
-            headers={"Content-Type": "application/json"},
-            data=body,
-        )
-
-
-# ---------------------------------------------------------------------------
-# .env loading (no third-party dependency).
-# ---------------------------------------------------------------------------
-
-def load_env_file(path: Path) -> None:
-    if not path.is_file():
-        return
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-def repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return {
+        "mode": "agent",
+        "pending": len(pending),
+        "ran": ran,
+        "failed": failed,
+        "sessions": targets,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -432,12 +371,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-export", action="store_true", help="Do not sync a chat export this run")
     parser.add_argument("--sync-only", action="store_true", help="Sync only; skip summary generation")
     parser.add_argument("--generate-all", action="store_true", help="Generate every session missing a summary (not just the latest)")
+    parser.add_argument(
+        "--generate-with",
+        choices=("agent", "provider", "none"),
+        default=None,
+        help=(
+            "Who generates summaries. 'agent' uses your subscription CLI via "
+            "$LESSONLENS_AGENT_CMD (no API key, no per-token cost); 'provider' calls the "
+            "server's configured LLM provider; 'none' skips generation. "
+            "Default: agent when $LESSONLENS_AGENT_CMD is set, else provider."
+        ),
+    )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=10,
+        help="Cap how many sessions the agent command is run for in one pass (default: 10)",
+    )
     parser.add_argument("--provider", default=None, help="Generation provider override (e.g. anthropic)")
     parser.add_argument("--model", default=None, help="Generation model override (e.g. claude-opus-5)")
     parser.add_argument("--state-file", default=None, help="Path to the incremental sync state file")
     parser.add_argument("--full-scan", action="store_true", help="Ignore the mtime watermark and rescan all images")
     parser.add_argument("--batch-size", type=int, default=20, help="Images per upload request (default: 20)")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be synced; make no network calls")
+    parser.add_argument(
+        "--target",
+        choices=(TARGET_HOSTED, TARGET_LOCAL),
+        default=None,
+        help="Which instance to sync into (default: $LESSONLENS_TARGET, else hosted)",
+    )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help=(
+            "After syncing into a LOCAL instance, push it up to the hosted one via "
+            "/api/backup/sync-remote. Only meaningful with --target local."
+        ),
+    )
+    parser.add_argument(
+        "--remote-url",
+        default=None,
+        help="Hosted URL to push to with --push (default: $LESSONLENS_API_URL)",
+    )
     return parser
 
 
@@ -446,11 +421,12 @@ def _log(msg: str) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    load_env_file(repo_root() / ".env")
-
-    api_url = args.api_url or os.environ.get("LESSONLENS_API_URL")
-    email = args.email or os.environ.get("LESSONLENS_EMAIL")
-    password = args.password or os.environ.get("LESSONLENS_PASSWORD")
+    cfg = load_config(
+        target=args.target,
+        api_url=args.api_url,
+        email=args.email,
+        password=args.password,
+    )
 
     state_file = Path(args.state_file) if args.state_file else default_state_file()
     state = load_state(state_file)
@@ -495,16 +471,17 @@ def run(args: argparse.Namespace) -> int:
             _log(f"... and {len(new_images) - 50} more images")
         return 0
 
-    if not api_url or not email or not password:
-        _log(
-            "ERROR: hosted API not configured. Set LESSONLENS_API_URL, LESSONLENS_EMAIL, "
-            "LESSONLENS_PASSWORD (env or repo .env), or pass --api-url/--email/--password."
-        )
+    problems = cfg.validate()
+    if problems:
+        _log("ERROR: LessonLens is not configured for this run:")
+        for problem in problems:
+            _log(f"  - {problem}")
         return 2
 
-    client = LessonLensClient(api_url)
+    _log(f"Target: {cfg.target} ({cfg.api_url})")
+    client = LessonLensClient(cfg.api_url)
     try:
-        client.login(email, password)
+        client.login(cfg.email, cfg.password)
     except ApiError as exc:
         _log(f"ERROR: {exc}")
         return 2
@@ -562,8 +539,15 @@ def run(args: argparse.Namespace) -> int:
 
     # --- Generate ---
     if not args.sync_only:
+        mode = resolve_generate_mode(args.generate_with, cfg)
         try:
-            if args.generate_all:
+            if mode == "none":
+                _log("Generation: skipped (--generate-with none).")
+            elif mode == "agent":
+                summary["generation"] = run_agent_generation(
+                    client, cfg, max_sessions=args.max_sessions
+                )
+            elif args.generate_all:
                 gen = client.generate_all_missing(args.provider, args.model)
                 summary["generation"] = gen
                 _log(f"Generation (all missing): {gen}")
@@ -582,6 +566,28 @@ def run(args: argparse.Namespace) -> int:
                     _log("Generation: no sessions available.")
         except ApiError as exc:
             _log(f"WARNING: generation failed (sync is complete): {exc}")
+
+    # --- Push local -> hosted (Mode B fallback) ---
+    if args.push:
+        if cfg.is_hosted:
+            _log(
+                "WARNING: --push is only meaningful with --target local "
+                "(you are already syncing straight to hosted); skipping."
+            )
+        else:
+            remote_url = args.remote_url or os.environ.get("LESSONLENS_API_URL", "")
+            if not (remote_url and cfg.email and cfg.password):
+                _log(
+                    "WARNING: --push needs a hosted URL plus LESSONLENS_EMAIL/"
+                    "LESSONLENS_PASSWORD; skipping."
+                )
+            else:
+                try:
+                    pushed = client.sync_remote(remote_url, cfg.email, cfg.password)
+                    summary["push"] = pushed
+                    _log(f"Pushed local -> hosted: {pushed}")
+                except ApiError as exc:
+                    _log(f"WARNING: push to hosted failed: {exc}")
 
     _log("\n=== update complete ===")
     _log(json.dumps(summary, ensure_ascii=False, indent=2))

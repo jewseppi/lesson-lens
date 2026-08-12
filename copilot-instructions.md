@@ -68,3 +68,31 @@ It reads `LESSONLENS_API_URL` / `LESSONLENS_EMAIL` / `LESSONLENS_PASSWORD`
 new images, uploads both, and generates the latest session. Use
 `--images-dir <folder>` if the cache scan yields nothing, `--dry-run` to
 preview, and `--sync-only` to skip generation.
+
+## Generating summaries yourself (preferred — no API key)
+
+When the user asks you to summarize lessons, do the work yourself through the
+**`lessonlens-hosted` MCP server** rather than calling
+`/api/sessions/{id}/generate`. The generate endpoint bills a provider per token;
+you are already paid for. The hosted MCP server talks to the user's remote
+instance directly, so there is no local database to keep in sync.
+
+Workflow:
+
+1. `list_sessions(needs_summary_only=True)` — find what needs doing.
+2. `get_session(session_id)` — read the transcript.
+3. `get_retrieval_context(session_id)` — prior vocabulary/corrections, so new
+   material stays consistent with earlier lessons.
+4. `get_session_attachments(session_id)` — worksheets/whiteboard photos, if any.
+5. `lesson_data_schema()` — the skeleton to fill in.
+6. `store_summary(session_id, lesson_data_json)` — write it back.
+
+Two rules the hosted importer enforces, which `store_summary` checks first and
+will tell you about explicitly:
+
+- `schema_version` must be exactly `"lesson-data.v1"`.
+- `lesson_date` must equal the `session_id`.
+
+If the user is working against a **local** instance instead, use the original
+`lessonlens` MCP server (same tool names, local SQLite) and then
+`make push` to send it up to hosted.

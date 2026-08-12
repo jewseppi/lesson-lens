@@ -1101,11 +1101,22 @@ def _delete_user_learning_data(conn, user_id):
     conn.execute("DELETE FROM uploads WHERE user_id = ?", (user_id,))
 
 
-def _normalize_backup_member(name):
-    normalized = name.replace("\\", "/").lstrip("/")
-    if not normalized or normalized.startswith("../") or "/../" in normalized:
-        raise ValueError("Backup contains an invalid file path")
-    return normalized
+from backup_helpers import (  # noqa: E402
+    BACKUP_SCHEMA_VERSION,
+    SUPPORTED_BACKUP_SCHEMAS,
+    attachment_archive_members,
+    attachment_manifest_entries,
+    load_backup_attachments as _load_backup_attachments,
+    normalize_member as _normalize_backup_member,
+    restore_backup_attachments as _restore_backup_attachments_impl,
+)
+
+
+def _restore_backup_attachments(conn, archive, manifest, user_id):
+    """Restore backup attachments into this instance's attachments folder."""
+    return _restore_backup_attachments_impl(
+        conn, archive, manifest, user_id, ATTACHMENTS_FOLDER
+    )
 
 
 def _read_backup_json(zip_file, name):
@@ -1124,9 +1135,11 @@ def _write_backup_member(destination_root, member_name, data):
     destination.write_bytes(data)
 
 
-def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
-    return {
-        "schema_version": "lessonlens-backup.v1",
+def _build_backup_manifest(user, run, upload, sessions_payload, summaries,
+                           attachment_rows=None, link_rows=None):
+    manifest = {
+        # v2 adds attachments. Importers treat a missing "attachments" key as v1.
+        "schema_version": BACKUP_SCHEMA_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "source_user": {
             "email": user["email"],
@@ -1158,6 +1171,10 @@ def _build_backup_manifest(user, run, upload, sessions_payload, summaries):
             for row in summaries
         ],
     }
+    # Attachments are keyed by sha256 / session-id string so they survive the
+    # trip to an instance with different autoincrement ids.
+    manifest.update(attachment_manifest_entries(attachment_rows, link_rows))
+    return manifest
 
 
 def _build_backup_archive(conn, user):
@@ -1177,7 +1194,10 @@ def _build_backup_archive(conn, user):
         (user["id"], run["run_id"]),
     ).fetchall()
 
-    manifest = _build_backup_manifest(user, run, upload, sessions_payload, summaries)
+    attachment_rows, link_rows = _load_backup_attachments(conn, user["id"])
+    manifest = _build_backup_manifest(
+        user, run, upload, sessions_payload, summaries, attachment_rows, link_rows
+    )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -1198,6 +1218,11 @@ def _build_backup_archive(conn, user):
                 f"summaries/{summary['session_id']}.json",
                 json.dumps(json.loads(summary["lesson_data_json"]), ensure_ascii=False, indent=2),
             )
+
+        # Image blobs, named by sha256 so the import side can match them to the
+        # manifest rows regardless of the source instance's stored filenames.
+        for member_name, blob in attachment_archive_members(attachment_rows, ATTACHMENTS_FOLDER):
+            archive.writestr(member_name, blob)
 
     buffer.seek(0)
     filename = f"lessonlens-backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
@@ -1607,7 +1632,9 @@ def _validate_backup_zip(raw_zip):
         archive.close()
         return None, str(exc)
 
-    if manifest.get("schema_version") != "lessonlens-backup.v1":
+    # v2 adds attachments; v1 archives remain importable (they simply carry no
+    # "attachments" key, and the attachment restore step becomes a no-op).
+    if manifest.get("schema_version") not in SUPPORTED_BACKUP_SCHEMAS:
         archive.close()
         return None, "Unsupported backup schema"
 
@@ -1902,11 +1929,17 @@ def import_backup():
                 )
                 imported_summaries += 1
 
+            imported_attachments, linked_attachments = _restore_backup_attachments(
+                conn, archive, manifest, user["id"]
+            )
+            conn.commit()
+
             _track_event(conn, user["id"], "import_backup", {
                 "session_count": session_count,
                 "summary_count": imported_summaries,
                 "skipped_session_count": skipped_session_count,
                 "skipped_summary_count": skipped_summary_count,
+                "attachment_count": imported_attachments,
                 "replace_existing": replace_existing,
             })
 
@@ -1916,6 +1949,8 @@ def import_backup():
                 "summary_count": imported_summaries,
                 "skipped_session_count": skipped_session_count,
                 "skipped_summary_count": skipped_summary_count,
+                "attachment_count": imported_attachments,
+                "attachment_link_count": linked_attachments,
                 "replace_existing": replace_existing,
             }), 201
     except ValueError as exc:

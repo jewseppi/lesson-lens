@@ -113,6 +113,56 @@ the updater at a folder where you save images instead, and the rest of the flow
 is unchanged. This is a deliberate design choice — a reliable folder-watch
 fallback over a brittle attempt to decrypt LINE's DB.
 
+## Generation without a provider API key (second pass)
+
+The first pass of the updater targeted the hosted server and called
+`/api/sessions/{id}/generate` — which needs a **provider API key on the server**
+and bills per token. That discarded the reason the agent bridge and MCP server
+exist: doing generation with a flat-rate **subscription agent**.
+
+The pieces existed but didn't connect: `api/mcp_server.py` had
+`store_summary(provider="claude-agent")` — the no-API-key write path — but was
+local-only (it imports `app.py` and every tool calls `get_db()`).
+
+**Added `api/mcp_server_hosted.py`**: a sibling MCP server exposing the same tool
+names against the hosted REST API over HTTP. An authenticated CLI agent now reads
+and writes the hosted instance directly — no local database, no sync-up step, no
+API key. It imports only the standard library plus `mcp`, so it runs on a machine
+that has never installed Flask.
+
+Two rules the hosted importer enforces are validated client-side so the agent
+gets an actionable message instead of an opaque HTTP 400: `schema_version` must
+be `lesson-data.v1`, and `lesson_date` must equal the session id.
+
+The updater gained `--generate-with agent|provider|none`. Agent mode runs
+`LESSONLENS_AGENT_CMD` once per session needing a summary — and with that unset
+it is deliberately **prepare-only**, reporting what needs doing and running
+nothing, so a misconfigured command can't fan out across the backlog
+(`--max-sessions`, default 10, caps it further).
+
+Config for both now resolves through one module, `scripts/lessonlens_config.py`,
+and the HTTP client is shared via `scripts/lessonlens_client.py`.
+
+### Backups now carry images
+
+`_build_backup_archive` exported chat, parse artifacts, and summaries — but not
+attachments. So `/api/backup/sync-remote` (the Settings "sync to remote" button)
+**silently dropped every lesson photo**. Fixed in `api/backup_helpers.py`, with
+the awkward part being identity: `attachments.id` is AUTOINCREMENT and
+`session_attachments.session_id` stores the integer `sessions.id`, so neither is
+portable. The wire format keys attachments by **sha256** and sessions by their
+**session-id string**, and the import remaps both to local ids, deduping so a
+re-import changes nothing. v1 archives still import (the attachment step no-ops).
+
+Splitting these helpers out of `app.py` also made them testable without the
+Flask stack — `make test` runs 48 dependency-light tests.
+
+> **Noted, not fixed:** `GET /api/attachments` joins
+> `session_attachments.session_id` against the session *string*, while the upload
+> path and `GET /api/sessions/{id}/attachments` both use the integer
+> `sessions.id`. That listing endpoint therefore under-reports session
+> assignments. Out of scope here; the export tolerates both conventions.
+
 ## Automation added (this branch)
 
 - **Backlog fill on Opus 5**: `make update-all` syncs and then generates every
