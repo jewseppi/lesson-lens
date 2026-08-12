@@ -44,6 +44,9 @@ web/dist/
 logs/
 .lessonlens/
 
+# Automatic pre-sync snapshots (api/restore_points.py)
+backups/
+
 # Test artifacts
 .coverage
 coverage.xml

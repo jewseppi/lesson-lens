@@ -163,6 +163,35 @@ Flask stack — `make test` runs 48 dependency-light tests.
 > `sessions.id`. That listing endpoint therefore under-reports session
 > assignments. Out of scope here; the export tolerates both conventions.
 
+### Restore points — a safety net for the sync paths
+
+Adding automation to data-mutating paths raises the cost of a bug, so those paths
+now protect themselves. `api/restore_points.py` captures a full snapshot before
+`/api/sync`, `/api/backup/import`, and `/api/reparse` — the three operations that
+rewrite parsed data (import with `replace_existing` calls
+`_delete_user_learning_data` outright).
+
+- Snapshots are ordinary `lessonlens-backup.v2` archives, so they include images,
+  can be downloaded, and **rollback replays them through the normal import path**
+  rather than a parallel restore implementation. `import_backup` was split into a
+  thin route plus `_import_backup_bytes`, which both callers share.
+- Retention is 7 days (`LESSONLENS_RESTORE_RETENTION_DAYS`), enforced on write so
+  it behaves the same on a server and a laptop — no scheduler required.
+- **Rollback snapshots the current state first**, so undoing is itself undoable.
+- Capture is best-effort: a new account has nothing to snapshot, and a snapshot
+  failure never fails the operation it was protecting.
+- Endpoints: `GET /api/restore-points`, `POST /api/restore-points/{id}/rollback`,
+  `GET /api/restore-points/{id}/download`, `DELETE /api/restore-points/{id}`.
+  UI lives in **Settings → Restore Points**, behind a confirm step.
+
+Snapshot filenames are sanitized on both write and read, so a tampered `filename`
+column cannot read outside the snapshot directory (covered by a test).
+
+**Not covered:** per-summary writes (`store_summary` / `/summary/import`) don't
+snapshot — a full archive per summary would be far too heavy when an agent is
+writing a backlog. The previous summary is still contained in the most recent
+sync snapshot.
+
 ## Automation added (this branch)
 
 - **Backlog fill on Opus 5**: `make update-all` syncs and then generates every

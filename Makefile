@@ -42,7 +42,7 @@ push:
 
 test:
 	cd api && $(PYTHON) -m pytest tests/test_line_mac_sync.py tests/test_backup_attachments.py \
-		tests/test_mcp_hosted.py -o addopts="" --noconftest -q
+		tests/test_mcp_hosted.py tests/test_restore_points.py -o addopts="" --noconftest -q
 
 schedule:
 	bash scripts/launchd/install.sh

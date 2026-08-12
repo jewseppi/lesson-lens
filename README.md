@@ -76,6 +76,25 @@ your command once per session (`{session_id}` is substituted).
 > non-interactive flags first, then set it. `--max-sessions` (default 10) caps
 > how many run in one pass.
 
+### Restore points (automatic safety net)
+
+Every operation that rewrites your parsed data — chat sync, backup import, and
+re-parse — takes a **restore point** first: a full snapshot (chat, summaries, and
+images) captured immediately before the change.
+
+- Kept for **7 days**, then deleted automatically. Override with
+  `LESSONLENS_RESTORE_RETENTION_DAYS`.
+- **Settings → Restore Points** lists them with what each contains and when it
+  expires, and gives you a confirm-guarded **Roll Back** button plus a download.
+- Rolling back **takes a snapshot of the current state first**, so a rollback is
+  itself undoable.
+- Capture is best-effort and never blocks the operation it protects: a brand new
+  account has nothing to snapshot, and a snapshot failure won't turn a working
+  sync into a failed one.
+
+This is the guardrail for changing the sync paths: if a bug slips in, the
+previous state is already on disk before the mutation runs.
+
 ### If the hosted app isn't reachable
 
 The older local-first flow still works: sync into a local instance, generate

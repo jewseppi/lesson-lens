@@ -833,6 +833,21 @@ def init_db():
             UNIQUE(session_id, attachment_id)
         );
 
+        -- Automatic pre-mutation snapshots (see api/restore_points.py).
+        CREATE TABLE IF NOT EXISTS restore_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            session_count INTEGER DEFAULT 0,
+            summary_count INTEGER DEFAULT 0,
+            attachment_count INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
         CREATE TABLE IF NOT EXISTS generation_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1110,6 +1125,40 @@ from backup_helpers import (  # noqa: E402
     normalize_member as _normalize_backup_member,
     restore_backup_attachments as _restore_backup_attachments_impl,
 )
+import restore_points as _restore_points  # noqa: E402
+
+RESTORE_POINTS_FOLDER = str(ROOT_DIR / "backups" / "restore-points")
+
+
+def _capture_restore_point(conn, user_id, reason):
+    """Snapshot the user's data before a mutating operation.
+
+    Best effort by design: a brand new account has nothing to snapshot, and a
+    snapshot failure must never turn a working sync into a failed one. Returns
+    the created restore point dict, or None when nothing was captured.
+    """
+    try:
+        user_row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user_row:
+            return None
+        archive_bytes, _filename, manifest = _build_backup_archive(conn, user_row)
+    except ValueError:
+        # "No parsed data to export" — nothing to protect yet.
+        return None
+    except Exception:
+        app.logger.exception("Restore point capture failed for user %s", user_id)
+        return None
+
+    try:
+        _restore_points.prune_restore_points(conn, RESTORE_POINTS_FOLDER)
+        created = _restore_points.create_restore_point(
+            conn, user_id, reason, archive_bytes, RESTORE_POINTS_FOLDER, manifest=manifest,
+        )
+        conn.commit()
+        return created
+    except Exception:
+        app.logger.exception("Restore point write failed for user %s", user_id)
+        return None
 
 
 def _restore_backup_attachments(conn, archive, manifest, user_id):
@@ -1721,6 +1770,110 @@ def preview_backup_import():
         conn.close()
 
 
+@app.route("/api/restore-points", methods=["GET"])
+@jwt_required()
+def list_restore_points_route():
+    """Snapshots taken automatically before sync/import/re-parse."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        # Drop anything past its retention window before reporting.
+        removed = _restore_points.prune_restore_points(conn, RESTORE_POINTS_FOLDER)
+        if removed:
+            conn.commit()
+        return jsonify({
+            "restore_points": _restore_points.list_restore_points(conn, user["id"]),
+            "retention_days": _restore_points.retention_days(),
+        }), 200
+    finally:
+        conn.close()
+
+
+@app.route("/api/restore-points/<int:restore_point_id>/download", methods=["GET"])
+@jwt_required()
+def download_restore_point(restore_point_id):
+    """Download a snapshot as an ordinary backup .zip."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        row = _restore_points.get_restore_point(conn, user["id"], restore_point_id)
+        if not row:
+            return jsonify({"error": "Restore point not found"}), 404
+        try:
+            data = _restore_points.read_restore_point_bytes(row, RESTORE_POINTS_FOLDER)
+        except OSError:
+            return jsonify({"error": "Restore point file is missing"}), 410
+        return send_file(
+            io.BytesIO(data),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=row["filename"],
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/restore-points/<int:restore_point_id>/rollback", methods=["POST"])
+@jwt_required()
+def rollback_restore_point(restore_point_id):
+    """Roll the user's data back to a snapshot.
+
+    Takes a fresh snapshot of the *current* state first, so a rollback is itself
+    undoable, then replays the chosen archive through the normal import path
+    with replace_existing semantics.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        row = _restore_points.get_restore_point(conn, user["id"], restore_point_id)
+        if not row:
+            return jsonify({"error": "Restore point not found"}), 404
+        try:
+            data = _restore_points.read_restore_point_bytes(row, RESTORE_POINTS_FOLDER)
+        except OSError:
+            return jsonify({"error": "Restore point file is missing"}), 410
+
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_ROLLBACK)
+    finally:
+        conn.close()
+
+    # _import_backup_bytes opens its own connection; the safety snapshot above is
+    # already committed, so a failure here still leaves the pre-rollback state
+    # recorded as a restore point.
+    return _import_backup_bytes(
+        data, True, email, capture_restore_point=False,
+    )
+
+
+@app.route("/api/restore-points/<int:restore_point_id>", methods=["DELETE"])
+@jwt_required()
+def delete_restore_point_route(restore_point_id):
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user = _load_user(conn, email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not _restore_points.delete_restore_point(
+            conn, user["id"], restore_point_id, RESTORE_POINTS_FOLDER
+        ):
+            return jsonify({"error": "Restore point not found"}), 404
+        conn.commit()
+        return jsonify({"message": "Restore point deleted"}), 200
+    finally:
+        conn.close()
+
+
 @app.route("/api/backup/import", methods=["POST"])
 @jwt_required()
 def import_backup():
@@ -1735,6 +1888,20 @@ def import_backup():
         return jsonify({"error": "No backup file selected"}), 400
 
     raw_zip = uploaded.read()
+    return _import_backup_bytes(raw_zip, replace_existing, email, capture_restore_point=True)
+
+
+def _import_backup_bytes(raw_zip, replace_existing, email, *,
+                         capture_restore_point=True,
+                         restore_point_reason=None):
+    """Import a backup archive.
+
+    Shared by ``POST /api/backup/import`` and restore-point rollback, so both go
+    through exactly one import implementation. When ``capture_restore_point`` is
+    set, the caller's current data is snapshotted first — importing with
+    ``replace_existing`` deletes learning data, so this is the operation the
+    safety net matters most for.
+    """
     result = _validate_backup_zip(raw_zip)
     parsed, error = result
     if error:
@@ -1748,6 +1915,13 @@ def import_backup():
         if not user:
             archive.close()
             return jsonify({"error": "User not found"}), 404
+
+        if capture_restore_point:
+            _capture_restore_point(
+                conn,
+                user["id"],
+                restore_point_reason or _restore_points.REASON_IMPORT,
+            )
 
         with archive:
             if replace_existing:
@@ -2222,6 +2396,10 @@ def sync_file():
         file = request.files["file"]
         if not file.filename:
             return jsonify({"error": "No file selected"}), 400
+
+        # Snapshot before merging anything into the canonical run, so a bad sync
+        # is one click away from being undone.
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_SYNC)
 
         _, ext = os.path.splitext(file.filename)
         if ext.lower() not in ALLOWED_EXTENSIONS:
@@ -4281,6 +4459,9 @@ def reparse_sessions():
         canonical_run = _load_latest_completed_run(conn, user["id"])
         if not canonical_run:
             return jsonify({"error": "No existing parse run"}), 404
+
+        # Re-parsing rewrites sessions.json and session metadata in place.
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_REPARSE)
 
         # Find the most recent upload file
         upload = conn.execute(
