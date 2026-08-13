@@ -47,9 +47,15 @@ def repo_root() -> Path:
 def load_env_file(path: Path | str) -> None:
     """Load KEY=VALUE lines from a .env file into os.environ.
 
-    Existing environment variables always win, so a shell export overrides the
-    file. Malformed lines and unreadable files are ignored. Accepts a str or a
-    Path so callers don't have to care.
+    A *non-empty* environment variable always wins, so a shell export overrides
+    the file. An empty one does not: MCP client configs commonly declare keys
+    with placeholder empty values, and those are passed to the server process as
+    real (empty) variables. Treating them as "already set" blocked the .env
+    fallback entirely, so the hosted MCP server reported missing credentials on a
+    correctly configured machine.
+
+    Malformed lines and unreadable files are ignored. Accepts a str or a Path so
+    callers don't have to care.
     """
     path = Path(path)
     if not path.is_file():
@@ -65,7 +71,7 @@ def load_env_file(path: Path | str) -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key and not os.environ.get(key):
             os.environ[key] = value
 
 
