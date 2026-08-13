@@ -6,12 +6,25 @@ lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 ## Run it locally
 
 ```bash
-make run-local      # builds the web UI, then starts the app on http://127.0.0.1:5001
+./start-local.sh
 ```
 
-That's the whole thing: the API serves the built UI from `web/dist`, so there is
-no second process. `make serve` skips the rebuild; `PORT=8000 make serve` moves
-it. First run needs `pip install -r api/requirements.txt`.
+One command, from a fresh machine or an existing checkout. It clones the repo if
+needed, switches to the default branch if you're sitting on a stale one, creates
+a virtualenv, installs dependencies, builds the web UI, creates your login if the
+database is new, starts the server **in the background**, and finishes by running
+the preflight — so you end on the real state of your setup rather than a wall of
+build output. Safe to re-run; that's also how you restart it.
+
+```bash
+./start-local.sh --logs    # follow the server log
+./start-local.sh --stop    # stop it
+PORT=8000 ./start-local.sh # somewhere other than 5001
+```
+
+If you'd rather drive it yourself, `make run-local` builds the UI and runs the
+app in the foreground (`make serve` skips the rebuild). Either way the API serves
+the built UI from `web/dist`, so there is no second process to babysit.
 
 The database upgrades itself on start — new tables are created in place and
 existing sessions, summaries, and images are untouched, so there is no migration
