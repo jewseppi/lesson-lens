@@ -217,6 +217,15 @@ already on screen.
 - **Volume that earns its growth.** Starts at 5 items a day; every 3 consecutive
   days it steps up by 2, to a cap of 30. Miss two days and it eases back one
   step instead of collapsing — so a busy week doesn't cost you the habit.
+- **Difficulty that earns its growth too.** A new item is asked
+  中文 → English (*Recall*) — the easy direction, and the one lessons already
+  exercise. Get it right twice and it flips to English → 中文 (*Produce*), which
+  is the skill actually missing when your own turns in class are in English.
+  Production is roughly three times harder, so leading with it on brand-new
+  material is how a review habit dies in week one; each item graduates instead.
+  Answer *Again* and it drops back to Recall rather than staying in the
+  direction it just failed. Corrections are exempt — "you said X, what should it
+  have been?" is production whichever way you turn it.
 
 There is nothing to import or migrate: review joins `user_retrieval_items`,
 which every generated summary already populates, so **every lesson you have is
