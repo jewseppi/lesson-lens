@@ -474,19 +474,28 @@ def _index_retrieval_items(conn, user_id, session_id, lesson_data):
 
     items = []
 
-    # Vocabulary
+    # Vocabulary.
+    # lesson-data.v1 names these term_zh / en / pos_or_type / example_zh. This
+    # read the pre-schema names (term / meaning / pos / example_sentence), so
+    # every `term` came back empty and *no vocabulary was ever indexed* — on any
+    # path. Legacy names are kept as fallbacks so older stored lessons still
+    # re-index correctly.
     for v in lesson_data.get("vocabulary", []):
-        term = v.get("term", "")
+        term = v.get("term_zh") or v.get("term") or ""
         if not term:
             continue
         items.append((
             user_id, session_id, "vocab", term,
             json.dumps({
-                "term": term,
+                "term_zh": term,
+                "term": term,  # legacy readers
                 "pinyin": v.get("pinyin", ""),
-                "meaning": v.get("meaning", ""),
-                "pos": v.get("pos", ""),
-                "example": v.get("example_sentence", ""),
+                "en": v.get("en") or v.get("meaning") or "",
+                "meaning": v.get("en") or v.get("meaning") or "",
+                "pos_or_type": v.get("pos_or_type") or v.get("pos") or "",
+                "example_zh": v.get("example_zh") or v.get("example_sentence") or "",
+                "example_en": v.get("example_en", ""),
+                "example_pinyin": v.get("example_pinyin", ""),
             }, ensure_ascii=False),
             "generation",
         ))
@@ -507,17 +516,27 @@ def _index_retrieval_items(conn, user_id, session_id, lesson_data):
             "generation",
         ))
 
-    # Corrections from summary (teacher corrections captured by LLM)
+    # Corrections from summary (teacher corrections captured by LLM).
+    # Same mismatch as vocabulary: the schema names these learner_original /
+    # teacher_correction / reason, so corrections were never indexed either —
+    # and they are the single highest-value thing to review, being the learner's
+    # own mistakes. Legacy names retained as fallbacks.
     for c in lesson_data.get("corrections", []):
-        wrong = c.get("student_said", c.get("wrong", ""))
+        wrong = c.get("learner_original") or c.get("student_said") or c.get("wrong") or ""
         if not wrong:
             continue
+        correct = c.get("teacher_correction") or c.get("correct_form") or c.get("corrected") or ""
+        why = c.get("reason") or c.get("explanation") or c.get("detail") or ""
         items.append((
             user_id, session_id, "correction", wrong,
             json.dumps({
-                "student_said": wrong,
-                "correct_form": c.get("correct_form", c.get("corrected", "")),
-                "explanation": c.get("explanation", c.get("detail", "")),
+                "learner_original": wrong,
+                "student_said": wrong,  # legacy readers
+                "teacher_correction": correct,
+                "correct_form": correct,
+                "reason": why,
+                "explanation": why,
+                "practice_prompt": c.get("practice_prompt", ""),
             }, ensure_ascii=False),
             "generation",
         ))
@@ -2971,6 +2990,14 @@ def import_summary(session_id):
             run_id=run["run_id"],
             user_id=user["id"],
         )
+
+        # The generate path indexes retrieval items; this one did not, so every
+        # summary written by a subscription agent produced zero vocabulary,
+        # sentences, and corrections — starving both Daily Review and the prior-
+        # context injection for later lessons. The agent path is the whole point
+        # of running without a provider API key, so it cannot be second-class.
+        _index_retrieval_items(conn, user["id"], session_id, lesson_data)
+        conn.commit()
 
         _track_event(conn, user["id"], "import_summary", {
             "session_id": session_id,
