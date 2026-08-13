@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { apiJson } from '../api';
+import {
+  DIRECTION_LABEL,
+  PRODUCTION_STREAK,
+  directionFor,
+  promptFor,
+} from '../reviewCards';
 import type {
   ReviewCompleteResult,
   ReviewGradeResult,
@@ -29,14 +35,6 @@ const TYPE_STYLE: Record<string, string> = {
   vocab: 'bg-emerald-900/40 text-emerald-300 border-emerald-800/60',
 };
 
-/** Front of the card: the prompt you have to answer from memory. */
-function promptFor(item: ReviewItem): string {
-  const d = item.data || {};
-  if (item.item_type === 'correction') return d.student_said || item.item_key;
-  if (item.item_type === 'key_sentence') return d.en || d.zh || item.item_key;
-  return d.term_zh || item.item_key;
-}
-
 function AnswerBody({ item }: { item: ReviewItem }) {
   const d = item.data || {};
 
@@ -46,41 +44,80 @@ function AnswerBody({ item }: { item: ReviewItem }) {
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">You said</div>
           <div className="text-lg text-red-300 line-through decoration-red-500/50">
-            {d.student_said || item.item_key}
+            {d.learner_original || d.student_said || item.item_key}
           </div>
         </div>
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Correct</div>
-          <div className="text-2xl text-emerald-300">{d.correct_form || '—'}</div>
+          <div className="text-2xl text-emerald-300">
+            {d.teacher_correction || d.correct_form || '—'}
+          </div>
         </div>
-        {d.explanation && (
-          <p className="text-sm text-gray-400 border-t border-gray-800 pt-3">{d.explanation}</p>
+        {(d.reason || d.explanation) && (
+          <p className="text-sm text-gray-400 border-t border-gray-800 pt-3">
+            {d.reason || d.explanation}
+          </p>
         )}
       </div>
     );
   }
 
+  // The back always shows the whole item, but leads with whichever side you
+  // were actually being asked for — so the thing you tried to recall is the
+  // thing you see first, not buried under what was already on the front.
+  const produce = directionFor(item) === 'production';
+
   if (item.item_type === 'key_sentence') {
+    const zh = d.zh || item.item_key;
     return (
       <div className="space-y-2">
-        <div className="text-2xl">{d.zh || item.item_key}</div>
-        {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
-        {d.en && <div className="text-base text-gray-300 border-t border-gray-800 pt-2">{d.en}</div>}
+        {produce ? (
+          <>
+            <div className="text-2xl">{zh}</div>
+            {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
+            {d.en && (
+              <div className="text-base text-gray-300 border-t border-gray-800 pt-2">{d.en}</div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="text-2xl text-gray-100">{d.en || '—'}</div>
+            <div className="border-t border-gray-800 pt-2">
+              <div className="text-lg text-gray-300">{zh}</div>
+              {d.pinyin && <div className="text-sm text-gray-500">{d.pinyin}</div>}
+            </div>
+          </>
+        )}
       </div>
     );
   }
 
+  const term = d.term_zh || item.item_key;
+  const example = d.example_zh && (
+    <div className="border-t border-gray-800 pt-2 text-sm text-gray-400">
+      <div>{d.example_zh}</div>
+      {d.example_en && <div className="text-gray-500">{d.example_en}</div>}
+    </div>
+  );
+
   return (
     <div className="space-y-2">
-      <div className="text-3xl">{d.term_zh || item.item_key}</div>
-      {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
-      {d.en && <div className="text-lg text-gray-300">{d.en}</div>}
-      {d.example_zh && (
-        <div className="border-t border-gray-800 pt-2 text-sm text-gray-400">
-          <div>{d.example_zh}</div>
-          {d.example_en && <div className="text-gray-500">{d.example_en}</div>}
-        </div>
+      {produce ? (
+        <>
+          <div className="text-3xl">{term}</div>
+          {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
+          {d.en && <div className="text-lg text-gray-300">{d.en}</div>}
+        </>
+      ) : (
+        <>
+          <div className="text-2xl text-gray-100">{d.en || '—'}</div>
+          <div className="border-t border-gray-800 pt-2">
+            <div className="text-3xl text-gray-300">{term}</div>
+            {d.pinyin && <div className="text-sm text-gray-500">{d.pinyin}</div>}
+          </div>
+        </>
       )}
+      {example}
     </div>
   );
 }
@@ -219,6 +256,25 @@ export default function ReviewPage() {
             {current.is_new && (
               <span className="text-[11px] px-2 py-0.5 rounded border bg-sky-900/40 text-sky-300 border-sky-800/60">
                 New
+              </span>
+            )}
+            {/* Which way round this card is. Shown because the direction changes
+                under you as an item matures, and an unexplained switch reads as
+                a bug rather than progress. */}
+            {current.item_type !== 'correction' && (
+              <span
+                className={`text-[11px] px-2 py-0.5 rounded border ${
+                  directionFor(current) === 'production'
+                    ? 'bg-purple-900/40 text-purple-300 border-purple-800/60'
+                    : 'bg-gray-800 text-gray-400 border-gray-700'
+                }`}
+                title={
+                  directionFor(current) === 'production'
+                    ? 'You know this one — produce it in Chinese'
+                    : `Recall the meaning. Gets ${PRODUCTION_STREAK - (current.streak ?? 0)} more right and it flips to production.`
+                }
+              >
+                {DIRECTION_LABEL[directionFor(current)]}
               </span>
             )}
             <Link
