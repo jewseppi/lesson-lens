@@ -426,7 +426,16 @@ def check_agent_command(report: Report, cfg, pending, run_probe: bool):
     probe_argv = cfg.build_agent_command(target)
     print(f"\nRunning agent probe for session {target}:\n  {' '.join(probe_argv)}\n")
     try:
-        result = subprocess.run(probe_argv, cwd=str(Path(_SCRIPTS_DIR).parent), timeout=1800)
+        # Capture rather than inherit: the CLI's own error message is the single
+        # most useful thing here, and reporting a bare exit code threw away the
+        # one line that says what to change.
+        result = subprocess.run(
+            probe_argv,
+            cwd=str(Path(_SCRIPTS_DIR).parent),
+            timeout=1800,
+            capture_output=True,
+            text=True,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         report.add(FAIL, "Agent probe", str(exc)[:200], "The command could not be run.")
         return
@@ -442,8 +451,23 @@ def check_agent_command(report: Report, cfg, pending, run_probe: bool):
             FAIL,
             "Agent probe",
             f"command exited {result.returncode}",
-            "Check the CLI's non-interactive flags; it may be waiting for input.",
+            _probe_failure_hint(result),
         )
+
+
+def _probe_failure_hint(result) -> str:
+    """Lead with what the CLI actually printed, then the usual suspects."""
+    output = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+    lines = [ln for ln in output.splitlines() if ln.strip()][-6:]
+    hint = ""
+    if lines:
+        hint += "The command said:\n" + "\n".join(f"   {ln[:160]}" for ln in lines) + "\n"
+    hint += (
+        "Common causes: the CLI is waiting for input (add its non-interactive\n"
+        "flag), or it needs the MCP tools pre-approved. For Claude Code:\n"
+        "  --allowedTools 'mcp__lessonlens-hosted__*'"
+    )
+    return hint
 
 
 def main(argv: list[str] | None = None) -> int:

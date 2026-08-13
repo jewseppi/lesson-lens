@@ -404,3 +404,57 @@ def test_connection_refused_names_the_command_that_fixes_it(monkeypatch):
     assert row[0] == doctor.FAIL
     assert "make serve" in row[3], "tell the user the command, not just the symptom"
     assert "LESSONLENS_LOCAL_URL" in row[3]
+
+
+# --- empty env vars must not shadow the .env ------------------------------
+
+def test_empty_env_var_falls_back_to_the_env_file(tmp_path, monkeypatch):
+    """MCP client configs declare keys with empty placeholder values.
+
+    Those reach the server process as real (empty) variables. Treating them as
+    "already set" blocked the .env fallback, so the hosted MCP server reported
+    missing credentials on a correctly configured machine.
+    """
+    from lessonlens_config import load_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("LESSONLENS_API_URL=https://from-dot-env\n", encoding="utf-8")
+
+    monkeypatch.setenv("LESSONLENS_API_URL", "")
+    load_env_file(env_file)
+    assert os.environ["LESSONLENS_API_URL"] == "https://from-dot-env"
+
+
+def test_real_env_var_still_beats_the_env_file(tmp_path, monkeypatch):
+    from lessonlens_config import load_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("LESSONLENS_API_URL=https://from-dot-env\n", encoding="utf-8")
+
+    monkeypatch.setenv("LESSONLENS_API_URL", "https://from-shell")
+    load_env_file(env_file)
+    assert os.environ["LESSONLENS_API_URL"] == "https://from-shell"
+
+
+def test_mcp_config_ships_no_placeholder_env_blocks():
+    """Regression guard for the config that caused the shadowing above."""
+    import json
+
+    config = json.loads(
+        open(os.path.join(ROOT, ".mcp.json"), encoding="utf-8").read()
+    )
+    for name, server in config["mcpServers"].items():
+        for key, value in (server.get("env") or {}).items():
+            assert value, f"{name}.env.{key} is empty and will shadow the .env"
+
+
+def test_failed_probe_surfaces_what_the_command_printed():
+    """A bare exit code threw away the one line that says what to change."""
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "--dangerously-skip-permissions cannot be used with root/sudo privileges"
+
+    hint = doctor._probe_failure_hint(Result())
+    assert "dangerously-skip-permissions" in hint
+    assert "allowedTools" in hint, "and still point at the usual fix"

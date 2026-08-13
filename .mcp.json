@@ -1,20 +1,13 @@
 {
+  "_comment": "Both servers read their settings from the repo's .env (LESSONLENS_API_URL, LESSONLENS_EMAIL, LESSONLENS_PASSWORD, LESSONLENS_USER_EMAIL). Do NOT add placeholder 'env' entries here: MCP clients pass them to the server process as real, empty variables, which used to shadow the .env values and made the server report missing credentials on a correctly configured machine.",
   "mcpServers": {
     "lessonlens": {
       "command": ".venv/bin/python",
-      "args": ["api/mcp_server.py"],
-      "env": {
-        "LESSONLENS_USER_EMAIL": ""
-      }
+      "args": ["api/mcp_server.py"]
     },
     "lessonlens-hosted": {
       "command": "python3",
-      "args": ["api/mcp_server_hosted.py"],
-      "env": {
-        "LESSONLENS_API_URL": "",
-        "LESSONLENS_EMAIL": "",
-        "LESSONLENS_PASSWORD": ""
-      }
+      "args": ["api/mcp_server_hosted.py"]
     }
   }
 }
