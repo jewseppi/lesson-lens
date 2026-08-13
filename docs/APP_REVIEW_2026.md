@@ -275,6 +275,59 @@ pre-sync restore point carrying its images.
   gap-filling update, so a run with no new export is a cheap no-op. The one step
   that can't be automated is the LINE export itself (no macOS scripting hook).
 
+## Daily Review — closing the loop that was never closed
+
+The sharpest finding of this whole review came from the owner, not the code:
+*"even though we've built this tool to improve review sessions and drive
+practice, I do not and have not used it at all."*
+
+That is not a content gap. The generated material is good. It is a **starting
+friction** problem, and the numbers made it obvious once framed that way: to
+review anything you had to choose a session, then a study mode, then work
+through a whole deck for that one lesson. Three decisions and an unbounded pile,
+against a real-world budget of ten minutes before class. `StudyModePage` is a
+*browser* for one lesson, not a *queue* across lessons — there was no answer to
+"what should I study right now?"
+
+**The corpus already existed.** `_index_retrieval_items` has been populating
+`user_retrieval_items` on every summary generation all along, with exactly the
+three highest-value item types: `correction` (the learner's own mistakes),
+`key_sentence`, and `vocab`. Nothing needed extracting and nothing needed
+backfilling. The only thing missing was scheduling state — the codebase had no
+concept of `due_at`, interval, or streak anywhere.
+
+So `review_schedule` holds *only* spacing state and joins the existing corpus on
+`item_key`. One copy of the content, every past lesson in the pool on day one,
+and a term taught across three lessons collapses to one thing to remember.
+
+Design decisions worth keeping:
+
+- **Time-boxed, not deck-boxed.** `minutes` converts to a card count, not the
+  reverse. Finishing is what builds the habit, so the queue is capped by the
+  daily target even when the time box would allow more.
+- **Two grades.** *Again* / *Got it*. Four buttons is a decision, and decisions
+  are the thing that killed usage.
+- **The ramp earns its growth.** Start at 5/day, `+2` every 3 consecutive days,
+  cap 30. One missed day is forgiven outright; two eases the target back one
+  step rather than dropping it off a cliff. Coming back after a bad week should
+  not feel like starting over.
+- **New material never starves.** A 50-item backlog still surfaces new items,
+  because a queue that only ever shows old cards is a queue you stop opening.
+
+Verified end to end against a running server: three consecutive simulated days
+graded through real HTTP, streak advancing 1 → 2 → 3 and the target stepping
+5 → 7 on the third — the ramp behaving as specified rather than as asserted.
+61 new tests (35 scheduler, 26 API).
+
+**Not built yet** (deliberately): a pre-class mode weighted toward the most
+recent lesson, and tuning the ordering from real `_track_event` data. Both want
+actual usage to learn from first.
+
+One known rough edge: `item_key` for a correction is the raw wrong utterance, so
+near-identical mistakes won't collapse into one item. Arguably correct — making
+the same mistake twice *should* resurface it — but it will need normalizing if
+it gets noisy.
+
 ## Suggested next steps (not in this branch)
 
 - **Image relevance filtering**: LINE's cache holds stickers and UI chrome too;

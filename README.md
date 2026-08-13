@@ -165,6 +165,35 @@ silently drops your lesson photos (it used to).
 See [docs/APP_REVIEW_2026.md](docs/APP_REVIEW_2026.md) for the design and the
 wider review of the app's state and gaps.
 
+## Daily Review
+
+A single queue across every lesson, built for the five minutes before class.
+
+The app already generated excellent study material and it went unused, because
+reviewing meant picking a session, then a mode, then facing a whole deck. Three
+decisions and an unbounded pile. Daily Review removes all three: the Dashboard
+shows **one card** (`12 due · 🔥 5`) and one button, and the first item is
+already on screen.
+
+- **Time-boxed, not deck-boxed.** You pick 5 or 10 minutes; the queue fills that
+  budget. Finishing is the goal, so it ends when the time does.
+- **Ordered for you.** Your own corrections first — the highest-value thing to
+  re-see — then whole sentences, then vocabulary. Most overdue first within each.
+- **Two buttons.** *Again* / *Got it*. Four would be a decision.
+- **Volume that earns its growth.** Starts at 5 items a day; every 3 consecutive
+  days it steps up by 2, to a cap of 30. Miss two days and it eases back one
+  step instead of collapsing — so a busy week doesn't cost you the habit.
+
+There is nothing to import or migrate: review joins `user_retrieval_items`,
+which every generated summary already populates, so **every lesson you have is
+in the pool the moment this ships**. A term taught across three lessons is one
+item to remember, not three.
+
+Items are scheduled with an SM-2-lite curve (`api/review_scheduler.py`): a
+correct answer pushes the next showing out by the item's ease factor, *Again*
+brings it back tomorrow and slows future growth. Suspend anything you never want
+to see again from the review settings endpoint.
+
 ## Agent Bridge
 
 If you want the repo to take a LINE export file path and run the full local workflow,

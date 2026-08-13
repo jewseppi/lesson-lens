@@ -971,6 +971,39 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_retrieval_user ON user_retrieval_items(user_id, item_type);
         CREATE INDEX IF NOT EXISTS idx_retrieval_key ON user_retrieval_items(user_id, item_key);
 
+        -- Daily Review scheduling. Deliberately holds *only* spacing state and
+        -- joins user_retrieval_items on item_key for the content, so there is
+        -- one copy of the corpus and every already-generated lesson is in the
+        -- pool with no backfill. Unique on item_key: a term taught across three
+        -- lessons is one thing to remember, not three.
+        CREATE TABLE IF NOT EXISTS review_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_key TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            due_at TEXT NOT NULL,
+            interval_days REAL NOT NULL DEFAULT 1,
+            ease REAL NOT NULL DEFAULT 2.5,
+            streak INTEGER NOT NULL DEFAULT 0,
+            lapses INTEGER NOT NULL DEFAULT 0,
+            last_reviewed_at TEXT,
+            suspended INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, item_key),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_due ON review_schedule(user_id, suspended, due_at);
+
+        CREATE TABLE IF NOT EXISTS review_stats (
+            user_id INTEGER PRIMARY KEY,
+            daily_target INTEGER NOT NULL DEFAULT 5,
+            streak INTEGER NOT NULL DEFAULT 0,
+            last_completed_on TEXT,
+            total_reviews INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
         CREATE TABLE IF NOT EXISTS user_feedback_memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1130,6 +1163,7 @@ from backup_helpers import (  # noqa: E402
     restore_backup_attachments as _restore_backup_attachments_impl,
 )
 import restore_points as _restore_points  # noqa: E402
+import review_scheduler  # noqa: E402
 
 RESTORE_POINTS_FOLDER = str(ROOT_DIR / "backups" / "restore-points")
 
@@ -2024,7 +2058,14 @@ def _import_backup_bytes(raw_zip, replace_existing, email, *,
                 ),
             )
 
+            # new_sessions is already filtered against existing_session_ids above
+            # (and replace mode empties it after deleting), so the only case left
+            # is an archive that repeats a session_id within itself.
+            seen_ids = set(existing_session_ids)
             for session in new_sessions:
+                if session["session_id"] in seen_ids:
+                    continue
+                seen_ids.add(session["session_id"])
                 conn.execute(
                     """INSERT INTO sessions
                        (run_id, user_id, session_id, date, start_time, end_time,
@@ -2307,7 +2348,18 @@ def parse_upload(upload_id):
              output_dir, datetime.now(timezone.utc).isoformat()),
         )
 
-        # Insert session records (skip empty sessions)
+        # Insert session records (skip empty sessions).
+        #
+        # Do NOT skip session_ids that already exist from an earlier run. It is
+        # the obvious fix for the duplicate rows this leaves behind, and it is
+        # wrong: `list_sessions` scopes to the *latest* run
+        # (`WHERE s.run_id = ?`), so a session skipped here stays stranded under
+        # the previous run id and vanishes from the UI. Since LINE exports are
+        # cumulative, re-parsing one would empty the sessions page entirely.
+        # Re-pointing old rows at the new run is not a fix either: summaries
+        # join on (session_id, run_id), so they would silently unlink.
+        # The duplicates are invisible to the UI and cost only table rows;
+        # `/api/sync` avoids them properly by merging into the canonical run.
         inserted_sessions = 0
         for sess in result["sessions"]:
             if sess["message_count"] == 0:
@@ -3651,6 +3703,331 @@ def retrieval_stats():
 
 
 # ---------------------------------------------------------------------------
+# Daily Review
+#
+# A single queue across every lesson, time-boxed, ordered on the learner's
+# behalf. The study material was never the problem — choosing what to study
+# was. See api/review_scheduler.py for the spacing and ramp rules.
+# ---------------------------------------------------------------------------
+
+REVIEW_ITEM_TYPES = ("correction", "key_sentence", "vocab")
+
+
+def _load_review_stats(conn, user_id):
+    """Current stats row, defaulted for a user who has never reviewed."""
+    row = conn.execute(
+        "SELECT * FROM review_stats WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    return {
+        "user_id": user_id,
+        "daily_target": review_scheduler.DEFAULT_DAILY_TARGET,
+        "streak": 0,
+        "last_completed_on": None,
+        "total_reviews": 0,
+    }
+
+
+def _candidate_review_items(conn, user_id):
+    """Every reviewable item the user owns, newest content per item_key.
+
+    One row per item_key: the same word taught in three lessons is one thing to
+    remember. Scheduling state is left-joined, so an item that has never been
+    reviewed simply comes back with a null due_at.
+    """
+    placeholders = ",".join("?" for _ in REVIEW_ITEM_TYPES)
+    rows = conn.execute(
+        f"""SELECT ri.item_key,
+                   ri.item_type,
+                   ri.item_data_json,
+                   ri.session_id,
+                   ri.created_at,
+                   rs.due_at,
+                   rs.interval_days,
+                   rs.ease,
+                   rs.streak,
+                   rs.lapses,
+                   rs.last_reviewed_at
+            FROM user_retrieval_items ri
+            JOIN (
+                SELECT item_key, MAX(id) AS newest_id
+                FROM user_retrieval_items
+                WHERE user_id = ? AND item_type IN ({placeholders})
+                GROUP BY item_key
+            ) newest ON newest.newest_id = ri.id
+            LEFT JOIN review_schedule rs
+                   ON rs.user_id = ri.user_id AND rs.item_key = ri.item_key
+            WHERE ri.user_id = ?
+              AND COALESCE(rs.suspended, 0) = 0""",
+        (user_id, *REVIEW_ITEM_TYPES, user_id),
+    ).fetchall()
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["data"] = json.loads(item.pop("item_data_json") or "{}")
+        except (ValueError, TypeError):
+            item["data"] = {}
+        items.append(item)
+    return items
+
+
+@app.route("/api/review/queue", methods=["GET"])
+@jwt_required()
+def review_queue():
+    """The review queue for right now, budgeted to a time box.
+
+    ``minutes`` turns into a card count rather than the other way round: the
+    learner has ten minutes before class, not a target number of cards.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        stats = _load_review_stats(conn, user["id"])
+        target = review_scheduler.decayed_target(stats)
+        minutes = request.args.get("minutes")
+        limit = review_scheduler.budget_to_item_count(minutes, target)
+
+        candidates = _candidate_review_items(conn, user["id"])
+        ordered = review_scheduler.order_queue(candidates)
+        queue = ordered[:limit]
+
+        now = datetime.now(timezone.utc)
+        due_now = sum(1 for item in candidates if review_scheduler.is_due(item.get("due_at"), now))
+
+        return jsonify({
+            "items": [
+                {
+                    "item_key": item["item_key"],
+                    "item_type": item["item_type"],
+                    "session_id": item["session_id"],
+                    "data": item["data"],
+                    "due_at": item.get("due_at"),
+                    "streak": item.get("streak") or 0,
+                    "is_new": item.get("due_at") is None,
+                }
+                for item in queue
+            ],
+            "count": len(queue),
+            "due_count": due_now,
+            "total_items": len(candidates),
+            "daily_target": target,
+            "streak": stats.get("streak", 0),
+            "minutes": minutes,
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/review/grade", methods=["POST"])
+@jwt_required()
+def review_grade():
+    """Record one graded item and return when it comes back."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    item_key = data.get("item_key")
+    grade = (data.get("grade") or "").lower()
+
+    if not item_key:
+        return jsonify({"error": "item_key required"}), 400
+    if grade not in (review_scheduler.GRADE_AGAIN, review_scheduler.GRADE_GOOD):
+        return jsonify({"error": "grade must be 'again' or 'good'"}), 400
+
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        owned = conn.execute(
+            """SELECT item_type FROM user_retrieval_items
+               WHERE user_id = ? AND item_key = ? LIMIT 1""",
+            (user["id"], item_key),
+        ).fetchone()
+        if not owned:
+            return jsonify({"error": "Item not found"}), 404
+
+        current = conn.execute(
+            "SELECT * FROM review_schedule WHERE user_id = ? AND item_key = ?",
+            (user["id"], item_key),
+        ).fetchone()
+
+        updated = review_scheduler.schedule_after_grade(
+            dict(current) if current else {}, grade
+        )
+
+        conn.execute(
+            """INSERT INTO review_schedule
+                   (user_id, item_key, item_type, due_at, interval_days, ease,
+                    streak, lapses, last_reviewed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, item_key) DO UPDATE SET
+                   due_at = excluded.due_at,
+                   interval_days = excluded.interval_days,
+                   ease = excluded.ease,
+                   streak = excluded.streak,
+                   lapses = excluded.lapses,
+                   last_reviewed_at = excluded.last_reviewed_at""",
+            (
+                user["id"], item_key, owned["item_type"],
+                updated["due_at"], updated["interval_days"], updated["ease"],
+                updated["streak"], updated["lapses"], updated["last_reviewed_at"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO review_stats (user_id, total_reviews)
+               VALUES (?, 1)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   total_reviews = total_reviews + 1,
+                   updated_at = datetime('now')""",
+            (user["id"],),
+        )
+        conn.commit()
+
+        return jsonify({
+            "item_key": item_key,
+            "due_at": updated["due_at"],
+            "interval_days": updated["interval_days"],
+            "streak": updated["streak"],
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/review/complete", methods=["POST"])
+@jwt_required()
+def review_complete():
+    """Mark today's review done: advances the streak and may raise the target.
+
+    Idempotent within a day — the ramp counts days of habit, not sessions.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        stats = _load_review_stats(conn, user["id"])
+        before_target = int(stats.get("daily_target") or review_scheduler.DEFAULT_DAILY_TARGET)
+        updated = review_scheduler.update_streak(stats)
+
+        conn.execute(
+            """INSERT INTO review_stats (user_id, daily_target, streak, last_completed_on)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   daily_target = excluded.daily_target,
+                   streak = excluded.streak,
+                   last_completed_on = excluded.last_completed_on,
+                   updated_at = datetime('now')""",
+            (user["id"], updated["daily_target"], updated["streak"],
+             updated["last_completed_on"]),
+        )
+        conn.commit()
+        _track_event(conn, user["id"], "review_complete", {"streak": updated["streak"]})
+
+        return jsonify({
+            "streak": updated["streak"],
+            "daily_target": updated["daily_target"],
+            "target_increased": updated["daily_target"] > before_target,
+            "last_completed_on": updated["last_completed_on"],
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/review/stats", methods=["GET"])
+@jwt_required()
+def review_stats_route():
+    """Due count, streak, and target — what the Dashboard card needs."""
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        stats = _load_review_stats(conn, user["id"])
+        candidates = _candidate_review_items(conn, user["id"])
+        now = datetime.now(timezone.utc)
+
+        due = 0
+        new = 0
+        for item in candidates:
+            if not item.get("due_at"):
+                new += 1
+                due += 1
+            elif review_scheduler.is_due(item["due_at"], now):
+                due += 1
+
+        target = review_scheduler.decayed_target(stats)
+        return jsonify({
+            "due_count": due,
+            "new_count": new,
+            "total_items": len(candidates),
+            "daily_target": target,
+            "streak": stats.get("streak", 0),
+            "total_reviews": stats.get("total_reviews", 0),
+            "last_completed_on": stats.get("last_completed_on"),
+            "completed_today": stats.get("last_completed_on") == review_scheduler.today_iso(),
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/review/settings", methods=["POST"])
+@jwt_required()
+def review_settings():
+    """Override the daily target, or suspend an item you never want again."""
+    email = get_jwt_identity()
+    data = request.get_json() or {}
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        if "daily_target" in data:
+            try:
+                target = int(data["daily_target"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "daily_target must be a number"}), 400
+            target = max(1, min(target, review_scheduler.MAX_DAILY_TARGET))
+            conn.execute(
+                """INSERT INTO review_stats (user_id, daily_target)
+                   VALUES (?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       daily_target = excluded.daily_target,
+                       updated_at = datetime('now')""",
+                (user["id"], target),
+            )
+
+        if "suspend_item_key" in data:
+            conn.execute(
+                """INSERT INTO review_schedule
+                       (user_id, item_key, item_type, due_at, suspended)
+                   VALUES (?, ?, 'vocab', datetime('now'), 1)
+                   ON CONFLICT(user_id, item_key) DO UPDATE SET suspended = 1""",
+                (user["id"], data["suspend_item_key"]),
+            )
+
+        conn.commit()
+        stats = _load_review_stats(conn, user["id"])
+        return jsonify({
+            "daily_target": stats.get("daily_target"),
+            "streak": stats.get("streak", 0),
+        })
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Fine-Tuning (Phase 5) - behind admin flag
 # ---------------------------------------------------------------------------
 
@@ -4284,6 +4661,64 @@ def list_attachments():
             })
 
         return jsonify({"attachments": attachments})
+    finally:
+        conn.close()
+
+
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+@jwt_required()
+def delete_session(session_id):
+    """Delete a session and everything hanging off it.
+
+    Snapshots first: this drops the session, its attachment links, summaries,
+    annotations, and retrieval items in one shot, and it is reachable from a
+    button in the UI. A restore point makes it undoable from Settings.
+    """
+    email = get_jwt_identity()
+    conn = get_db()
+    try:
+        user, err = _require_active_user(conn, email)
+        if err:
+            return err
+
+        run = _load_latest_completed_run(conn, user["id"])
+        if not run:
+            return jsonify({"error": "No completed parse run"}), 404
+
+        # sessions.run_id holds the run-id *string*, not parse_runs.id — and
+        # scope by user_id rather than trusting the run join alone.
+        sess = conn.execute(
+            "SELECT id FROM sessions WHERE session_id = ? AND run_id = ? AND user_id = ?",
+            (session_id, run["run_id"], user["id"]),
+        ).fetchone()
+        if not sess:
+            return jsonify({"error": "Session not found"}), 404
+
+        _capture_restore_point(conn, user["id"], _restore_points.REASON_DELETE_SESSION)
+
+        sess_int_id = sess["id"]
+        conn.execute(
+            "DELETE FROM session_attachments WHERE session_id = ? AND user_id = ?",
+            (sess_int_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM user_retrieval_items WHERE user_id = ? AND session_id = ?",
+            (user["id"], session_id),
+        )
+        conn.execute(
+            "DELETE FROM lesson_summaries WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM annotations WHERE session_id = ? AND user_id = ?",
+            (session_id, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ? AND user_id = ?",
+            (sess_int_id, user["id"]),
+        )
+        conn.commit()
+        return jsonify({"deleted": True})
     finally:
         conn.close()
 
