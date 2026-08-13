@@ -458,3 +458,45 @@ def test_failed_probe_surfaces_what_the_command_printed():
     hint = doctor._probe_failure_hint(Result())
     assert "dangerously-skip-permissions" in hint
     assert "allowedTools" in hint, "and still point at the usual fix"
+
+
+def test_mcp_check_fails_when_the_server_cannot_resolve_its_config(monkeypatch):
+    """Importing proves the dependency, not that the agent can reach anything.
+
+    mcp_server_hosted resolves its config at import time, always for the hosted
+    target. A local-only setup with no LESSONLENS_API_URL leaves the agent dead
+    on arrival, and this check used to report "your agent can read/write".
+    """
+    import types
+
+    stub = types.SimpleNamespace(
+        _CONFIG=types.SimpleNamespace(
+            validate=lambda: ["Hosted target needs LESSONLENS_API_URL, ..."],
+            api_url="",
+        )
+    )
+    monkeypatch.setitem(sys.modules, "mcp_server_hosted", stub)
+
+    report = doctor.Report()
+    doctor.check_mcp(report, _cfg())
+    row = _find(report, "Hosted MCP server")
+    assert row[0] == doctor.FAIL
+    assert "config is incomplete" in row[2]
+    assert "LESSONLENS_API_URL" in row[3]
+
+
+def test_mcp_check_passes_and_names_the_target(monkeypatch):
+    import types
+
+    stub = types.SimpleNamespace(
+        _CONFIG=types.SimpleNamespace(
+            validate=lambda: [], api_url="http://127.0.0.1:5001",
+        )
+    )
+    monkeypatch.setitem(sys.modules, "mcp_server_hosted", stub)
+
+    report = doctor.Report()
+    doctor.check_mcp(report, _cfg())
+    row = _find(report, "Hosted MCP server")
+    assert row[0] == doctor.OK
+    assert "127.0.0.1:5001" in row[2], "say where it will actually write"

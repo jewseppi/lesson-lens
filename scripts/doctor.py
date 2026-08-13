@@ -348,10 +348,38 @@ def check_mcp(report: Report, cfg):
         )
         return
 
+    # Importing proves the dependency is sane; it says nothing about whether the
+    # server can reach anything. It resolves its own config at import time,
+    # always for the *hosted* target, so a local-only setup with no
+    # LESSONLENS_API_URL leaves the agent dead on arrival — while this check
+    # cheerfully reported "your agent can read/write". Ask the module what it
+    # actually resolved.
+    server_problems = []
+    try:
+        server_problems = mcp_server_hosted._CONFIG.validate()
+    except Exception:  # pragma: no cover - older server without _CONFIG
+        server_problems = []
+
+    if server_problems:
+        report.add(
+            FAIL,
+            "Hosted MCP server",
+            "imports cleanly, but its own config is incomplete: "
+            + " ".join(server_problems)[:160],
+            "The MCP server always resolves the HOSTED target, even when the\n"
+            "updater is pointed at local. Set these in the repo's .env:\n"
+            "  LESSONLENS_API_URL / LESSONLENS_EMAIL / LESSONLENS_PASSWORD\n"
+            "(for a local app, point LESSONLENS_API_URL at it, e.g.\n"
+            " http://127.0.0.1:5001). Without them the agent starts and then\n"
+            "reports it has no LessonLens tools.",
+        )
+        return
+
     report.add(
         OK,
         "Hosted MCP server",
-        f"imports cleanly (mcp {version}) — your agent can read/write the hosted app",
+        f"imports cleanly (mcp {version}); configured for "
+        f"{mcp_server_hosted._CONFIG.api_url}",
     )
 
     # Both servers expose 9 identically-named tools, store_summary among them. If
