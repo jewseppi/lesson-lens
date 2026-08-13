@@ -11,6 +11,7 @@
 #   ./start-local.sh           start (or restart) everything
 #   ./start-local.sh --stop    stop the server
 #   ./start-local.sh --logs    follow the server log
+#   ./start-local.sh --status  is it running, and where?
 #   ./start-local.sh --no-git  don't switch branches or pull
 #
 set -euo pipefail
@@ -82,14 +83,59 @@ stop_server() {
   return 0
 }
 
+port_is_free() {
+  # A bind test is the only honest check: lsof may be absent, and macOS system
+  # services (AirPlay Receiver owns 5000, sometimes 7000) hold ports that lsof
+  # shows but you cannot kill.
+  "${PY:-python3}" - "$1" <<'PYEOF' 2>/dev/null
+import socket, sys
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PYEOF
+}
+
+# Report exactly what is and isn't running, so "refused to connect" always has an
+# answer that doesn't require reading a log.
+show_status() {
+  bold "LessonLens status"
+  local running=0
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    info "process: running (pid $(cat "$PIDFILE"))"
+    running=1
+  else
+    warn "process: NOT running"
+  fi
+  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/api/health" 2>/dev/null; then
+    info "http:    responding at http://127.0.0.1:$PORT"
+    info ""
+    info "Open http://127.0.0.1:$PORT"
+  else
+    warn "http:    nothing answering on port $PORT"
+    if [ "$running" = "1" ]; then
+      warn "the process is alive but not serving — last log lines:"
+      tail -15 "$LOGFILE" 2>/dev/null | sed 's/^/     /'
+    else
+      warn "start it with:  ./start-local.sh"
+    fi
+  fi
+  [ -f "$LOGFILE" ] && info "log:     $LOGFILE" || warn "log:     none yet (the server has never started here)"
+  return 0
+}
+
 NO_GIT=0
 for arg in "$@"; do
   case "$arg" in
     --stop)   bold "Stopping LessonLens"; stop_server; exit 0 ;;
     --logs)   exec tail -f "$LOGFILE" ;;
+    --status) show_status; exit 0 ;;
     --no-git) NO_GIT=1 ;;
     -h|--help)
-      sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) die "unknown option: $arg (try --help)" ;;
   esac
@@ -180,6 +226,32 @@ else
 fi
 
 # --- config ---------------------------------------------------------------
+# --- pick a port that will actually bind --------------------------------
+# Do this before .env is written, so the file records the port we really use.
+stop_server
+if ! port_is_free "$PORT"; then
+  ORIGINAL_PORT="$PORT"
+  for candidate in 5002 5055 5175 8000 8080 8765; do
+    if port_is_free "$candidate"; then PORT="$candidate"; break; fi
+  done
+  if [ "$PORT" = "$ORIGINAL_PORT" ]; then
+    die "port $PORT is taken and no fallback was free — pick one: PORT=9123 ./start-local.sh"
+  fi
+  warn "port $ORIGINAL_PORT is in use (on macOS, AirPlay Receiver holds 5000);"
+  warn "using $PORT instead — the URL below reflects it"
+  # An existing .env still points at the old port; keep it consistent or the
+  # updater and MCP server will aim at a server that isn't there.
+  if [ -f .env ]; then
+    "${PY:-python3}" - "$ORIGINAL_PORT" "$PORT" <<'PYEOF'
+import pathlib, sys
+old, new = sys.argv[1], sys.argv[2]
+p = pathlib.Path(".env")
+p.write_text(p.read_text().replace(f"127.0.0.1:{old}", f"127.0.0.1:{new}"))
+PYEOF
+    info "updated .env to port $PORT"
+  fi
+fi
+
 if [ ! -f .env ]; then
   bold "First run — creating .env"
   if [ -t 0 ]; then
@@ -242,7 +314,7 @@ conn.close()
 PYEOF
 
 # --- server ---------------------------------------------------------------
-stop_server
+# (stop_server already ran during port selection above.)
 info "starting the server on port $PORT"
 (
   cd api
@@ -256,7 +328,24 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.5
 done
-[ "${READY:-0}" = "1" ] || { warn "server did not come up — last lines of $LOGFILE:"; tail -20 "$LOGFILE"; exit 1; }
+if [ "${READY:-0}" != "1" ]; then
+  # Never exit quietly here: the next thing that happens is the browser saying
+  # "refused to connect", with nothing on screen explaining why.
+  echo
+  printf '\033[31m%s\033[0m\n' "  THE SERVER DID NOT START — the app is NOT running."
+  echo
+  warn "last lines of $LOGFILE:"
+  tail -20 "$LOGFILE" 2>/dev/null | sed 's/^/     /'
+  echo
+  if grep -qi "address already in use" "$LOGFILE" 2>/dev/null; then
+    warn "something else is on port $PORT. Retry on another:  PORT=9123 ./start-local.sh"
+  elif grep -qi "ModuleNotFoundError\|ImportError" "$LOGFILE" 2>/dev/null; then
+    warn "a dependency is missing. Try:  rm -rf .venv && ./start-local.sh"
+  else
+    warn "re-run to see it again, or send me the lines above:  ./start-local.sh"
+  fi
+  exit 1
+fi
 info "server ready at http://127.0.0.1:$PORT"
 
 # --- preflight ------------------------------------------------------------
@@ -278,6 +367,7 @@ cat <<EOF
     3. Daily Review is at the top of the Dashboard.
 
   Server control:
+    ./start-local.sh --status  is it running, and where?
     ./start-local.sh --logs    follow the log
     ./start-local.sh --stop    stop it
     ./start-local.sh           restart (safe to re-run any time)
