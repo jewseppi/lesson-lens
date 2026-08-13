@@ -16,6 +16,14 @@
 #
 set -euo pipefail
 
+# `set -e` plus `pipefail` can kill this script mid-step with no output at all —
+# a command substitution whose first pipeline stage fails takes the whole run
+# down, and the last thing on screen is an unrelated success line. That happened
+# in the wild: `git symbolic-ref` fails when origin is unreachable, and the
+# script died right after "working offline" without starting anything. Never
+# again: say where it stopped.
+trap 'status=$?; [ $status -ne 0 ] && printf "\033[31m\n  x start-local.sh stopped unexpectedly (line %s, exit %s).\n    Re-run and send me this line — that is the bug.\033[0m\n" "$LINENO" "$status" >&2; exit $status' ERR
+
 REPO_URL="https://github.com/jewseppi/lesson-lens.git"
 PORT="${PORT:-5001}"
 DEFAULT_EMAIL="${LESSONLENS_EMAIL:-me@example.com}"
@@ -155,7 +163,10 @@ sync_git() {
   local branch default
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
   git fetch origin >/dev/null 2>&1 || warn "could not reach origin — working offline"
-  default="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+  # `|| true` is load-bearing: git symbolic-ref fails when origin/HEAD is not
+  # set (or origin is unreachable), and under pipefail that failure propagates
+  # out of the substitution and terminates the script.
+  default="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
   if [ -z "$default" ]; then
     for guess in main master; do
       git rev-parse --verify --quiet "origin/$guess" >/dev/null 2>&1 && { default="$guess"; break; }
@@ -178,7 +189,7 @@ sync_git() {
       # An untracked file that also exists on the target branch blocks checkout.
       # Move the offenders aside instead of dead-ending.
       local blocked
-      blocked="$(git checkout "$default" 2>&1 | sed -n 's/^\t//p' | tr -d '\r')"
+      blocked="$(git checkout "$default" 2>&1 | sed -n 's/^\t//p' | tr -d '\r' || true)"
       if [ -n "$blocked" ]; then
         while IFS= read -r f; do
           [ -e "$f" ] || continue
