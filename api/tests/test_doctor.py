@@ -369,3 +369,38 @@ def test_probe_failure_is_reported(monkeypatch):
     row = _find(report, "Agent probe")
     assert row[0] == doctor.FAIL
     assert "non-interactive" in row[3]
+
+
+# --- local port agreement --------------------------------------------------
+
+def test_app_and_updater_agree_on_the_local_port():
+    """The app's default port and the updater's local URL must match.
+
+    When these drifted (app on 5001, LESSONLENS_LOCAL_URL on 5000) `make doctor`
+    reported "Connection refused" against a perfectly good local setup — a
+    self-inflicted wrong diagnosis, which is the one thing a preflight must not do.
+    """
+    import app as app_module
+    from lessonlens_config import DEFAULT_LOCAL_PORT, DEFAULT_LOCAL_URL
+
+    assert app_module.DEFAULT_LOCAL_PORT == DEFAULT_LOCAL_PORT
+    assert DEFAULT_LOCAL_URL.endswith(f":{app_module.DEFAULT_LOCAL_PORT}")
+
+
+def test_connection_refused_names_the_command_that_fixes_it(monkeypatch):
+    from lessonlens_config import Config
+
+    def boom(self, email, password):
+        raise doctor.ApiError("POST /api/login failed: Connection refused")
+
+    monkeypatch.setattr(doctor.LessonLensClient, "login", boom)
+    report = doctor.Report()
+    cfg = Config(
+        target="local", api_url="http://127.0.0.1:5001",
+        email="me@example.com", password="pw",
+    )
+    doctor.check_connection(report, cfg)
+    row = _find(report, "Hosted login")
+    assert row[0] == doctor.FAIL
+    assert "make serve" in row[3], "tell the user the command, not just the symptom"
+    assert "LESSONLENS_LOCAL_URL" in row[3]

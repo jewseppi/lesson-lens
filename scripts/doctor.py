@@ -106,8 +106,12 @@ def check_connection(report: Report, cfg):
             fix = f"Cannot resolve {cfg.api_url}. Check the URL and your network."
         elif "Connection refused" in message:
             fix = (
-                f"Nothing is listening at {cfg.api_url}. "
-                "If target=local, start the app first (see README Deployment)."
+                f"Nothing is listening at {cfg.api_url}.\n"
+                "Start the app in another terminal:\n"
+                "  make serve\n"
+                "If it is already running on a different port, point at it:\n"
+                "  LESSONLENS_LOCAL_URL=http://127.0.0.1:<port> make doctor\n"
+                "or start it where you expect:  PORT=<port> make serve"
             )
         else:
             fix = "Confirm the app is running and reachable at that URL."

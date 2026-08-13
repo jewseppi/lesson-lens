@@ -31,8 +31,12 @@ TARGET_HOSTED = "hosted"
 TARGET_LOCAL = "local"
 VALID_TARGETS = (TARGET_HOSTED, TARGET_LOCAL)
 
-# Where a locally-running LessonLens server listens by default.
-DEFAULT_LOCAL_URL = "http://127.0.0.1:5000"
+# Where a locally-running LessonLens server listens by default. Must match
+# api/app.py's DEFAULT_LOCAL_PORT — when these drifted apart (app on 5001, this
+# on 5000) `make doctor` reported "Connection refused" against a perfectly good
+# setup. There's a test pinning them together.
+DEFAULT_LOCAL_PORT = 5001
+DEFAULT_LOCAL_URL = f"http://127.0.0.1:{DEFAULT_LOCAL_PORT}"
 
 
 def repo_root() -> Path:

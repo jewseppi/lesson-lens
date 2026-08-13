@@ -89,6 +89,11 @@ def handle_413(exc):
 
 DB_PATH = str(ROOT_DIR / "api" / "lessonlens.db")
 
+# The port `python api/app.py` serves on. Kept in one place and mirrored by
+# scripts/lessonlens_config.py, so "run it locally" and "point the updater at
+# my local app" cannot drift apart.
+DEFAULT_LOCAL_PORT = 5001
+
 # ---------------------------------------------------------------------------
 # Preview mode — read-only enforcement for Cloudflare Pages preview builds
 # ---------------------------------------------------------------------------
@@ -6178,4 +6183,9 @@ with app.app_context():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    # Honour PORT so the app and the updater can be aimed at the same place.
+    # These two disagreeing (app on 5001, LESSONLENS_LOCAL_URL on 5000) made
+    # `make doctor` report a connection failure that had nothing to do with the
+    # user's setup — exactly the kind of friction this tooling exists to remove.
+    port = int(os.environ.get("PORT") or os.environ.get("LESSONLENS_PORT") or DEFAULT_LOCAL_PORT)
+    app.run(debug=True, port=port)
