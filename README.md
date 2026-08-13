@@ -3,6 +3,27 @@
 Turns exported LINE/chat lesson transcripts into structured study packages:
 lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 
+## Run it locally
+
+```bash
+make run-local      # builds the web UI, then starts the app on http://127.0.0.1:5001
+```
+
+That's the whole thing: the API serves the built UI from `web/dist`, so there is
+no second process. `make serve` skips the rebuild; `PORT=8000 make serve` moves
+it. First run needs `pip install -r api/requirements.txt`.
+
+The database upgrades itself on start — new tables are created in place and
+existing sessions, summaries, and images are untouched, so there is no migration
+step after pulling.
+
+Then point the updater at it instead of a hosted server:
+
+```bash
+LESSONLENS_TARGET=local make doctor
+LESSONLENS_TARGET=local make update-all
+```
+
 ## Check your setup first
 
 ```bash
