@@ -46,6 +46,9 @@ web/dist/
 # Local updater state / logs
 logs/
 .lessonlens/
+# start-local.sh bookkeeping
+.lessonlens-server.pid
+.lessonlens-server.log
 
 # Automatic pre-sync snapshots (api/restore_points.py)
 backups/
