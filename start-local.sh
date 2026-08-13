@@ -8,9 +8,10 @@
 # exists, starts the server in the background, and finishes by running the
 # preflight so you see the real state rather than a wall of build output.
 #
-#   ./start-local.sh          start (or restart) everything
-#   ./start-local.sh --stop   stop the server
-#   ./start-local.sh --logs   follow the server log
+#   ./start-local.sh           start (or restart) everything
+#   ./start-local.sh --stop    stop the server
+#   ./start-local.sh --logs    follow the server log
+#   ./start-local.sh --no-git  don't switch branches or pull
 #
 set -euo pipefail
 
@@ -81,33 +82,75 @@ stop_server() {
   return 0
 }
 
-case "${1:-}" in
-  --stop) bold "Stopping LessonLens"; stop_server; exit 0 ;;
-  --logs) exec tail -f "$LOGFILE" ;;
-esac
+NO_GIT=0
+for arg in "$@"; do
+  case "$arg" in
+    --stop)   bold "Stopping LessonLens"; stop_server; exit 0 ;;
+    --logs)   exec tail -f "$LOGFILE" ;;
+    --no-git) NO_GIT=1 ;;
+    -h|--help)
+      sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) die "unknown option: $arg (try --help)" ;;
+  esac
+done
 
 bold "LessonLens — local setup in $REPO"
 
-# --- update ---------------------------------------------------------------
-if git rev-parse --git-dir >/dev/null 2>&1; then
-  BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-  DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
-  DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+# --- get onto the right branch, up to date --------------------------------
+# Running from a stale feature branch is the single most confusing failure:
+# everything "works", you just get old code, and `git pull` reports nothing to
+# do. So this actively lands you on the default branch. Local work is stashed
+# rather than refused — recoverable, and reported loudly — because leaving you
+# stuck on a dead branch is the worse outcome. Skip it all with --no-git.
+sync_git() {
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
 
-  if [ -n "$(git status --porcelain)" ]; then
-    warn "uncommitted changes on '$BRANCH' — not touching git. Commit or stash them,"
-    warn "then re-run. To discard them:  git checkout -- . && git clean -fd"
-  elif [ "$BRANCH" != "$DEFAULT_BRANCH" ]; then
-    # A stale feature branch is the likeliest reason for "I pulled but nothing
-    # changed" — say so and move, rather than silently serving old code.
-    warn "on branch '$BRANCH', not '$DEFAULT_BRANCH' — switching"
-    git checkout "$DEFAULT_BRANCH" >/dev/null 2>&1 || die "could not switch to $DEFAULT_BRANCH"
-    git pull --ff-only >/dev/null 2>&1 || true
-    info "now on $DEFAULT_BRANCH: $(git log --oneline -1)"
-  else
-    git pull --ff-only >/dev/null 2>&1 && info "updated to $(git log --oneline -1)" \
-      || warn "git pull skipped (branch may not track a remote)"
+  local branch default
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  git fetch origin >/dev/null 2>&1 || warn "could not reach origin — working offline"
+  default="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+  if [ -z "$default" ]; then
+    for guess in main master; do
+      git rev-parse --verify --quiet "origin/$guess" >/dev/null 2>&1 && { default="$guess"; break; }
+    done
   fi
+  default="${default:-main}"
+
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    # Tracked changes only: stashing untracked files would swallow a
+    # hand-dropped copy of this very script.
+    if git stash push -m "start-local.sh autostash $(date '+%Y-%m-%d %H:%M')" >/dev/null 2>&1; then
+      STASHED=1
+      warn "stashed your uncommitted changes on '$branch' — restore with: git stash pop"
+    fi
+  fi
+
+  if [ "$branch" != "$default" ]; then
+    warn "on '$branch', which is not '$default' — switching so you get current code"
+    if ! git checkout "$default" >/dev/null 2>&1; then
+      # An untracked file that also exists on the target branch blocks checkout.
+      # Move the offenders aside instead of dead-ending.
+      local blocked
+      blocked="$(git checkout "$default" 2>&1 | sed -n 's/^\t//p' | tr -d '\r')"
+      if [ -n "$blocked" ]; then
+        while IFS= read -r f; do
+          [ -e "$f" ] || continue
+          mv "$f" "$f.local-backup" && warn "moved untracked $f -> $f.local-backup"
+        done <<< "$blocked"
+      fi
+      git checkout "$default" >/dev/null 2>&1 || die "could not switch to $default — resolve git by hand, then re-run"
+    fi
+  fi
+
+  git pull --ff-only >/dev/null 2>&1 || warn "could not fast-forward $default (diverged or offline)"
+  info "on $default: $(git log --oneline -1)"
+}
+
+if [ "${NO_GIT:-0}" = "1" ]; then
+  info "--no-git: leaving the working tree exactly as it is"
+else
+  sync_git
 fi
 
 # --- python ---------------------------------------------------------------
@@ -239,5 +282,11 @@ cat <<EOF
     ./start-local.sh --stop    stop it
     ./start-local.sh           restart (safe to re-run any time)
 EOF
+
+if [ "${STASHED:-0}" = "1" ]; then
+  echo
+  warn "your uncommitted changes were stashed to get you onto the default branch."
+  warn "get them back with:  git stash pop        (see them with: git stash list)"
+fi
 
 exit $DOCTOR_STATUS
