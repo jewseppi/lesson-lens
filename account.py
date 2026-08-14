@@ -13,37 +13,37 @@ Run it from the repo root.
 """
 import argparse
 import getpass
+import hashlib
 import os
 import sqlite3
+import string
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "api", "lessonlens.db")
 MIN_PASSWORD = 16
+SALT_ALPHABET = string.ascii_letters + string.digits
 
 
-def ensure_werkzeug():
-    """Re-run under the project virtualenv if this interpreter lacks werkzeug.
+def hash_password(password):
+    """Produce a hash the app will accept, using only the standard library.
 
-    Password hashing has to produce exactly the format the app verifies, so it
-    has to be werkzeug's — and werkzeug lives in .venv, not in the system
-    python people naturally reach for. Rather than fail with ModuleNotFoundError
-    after already prompting for a password, switch interpreters up front.
+    Werkzeug's default is scrypt, but it verifies pbkdf2:sha256 just as happily,
+    and pbkdf2 is available in hashlib. Generating it here means this script has
+    no dependencies at all — which matters because the alternative was requiring
+    the project virtualenv, and every attempt to locate that reliably (system
+    python, .venv/bin/python, re-exec) produced a new way to fail *after* the
+    password prompt. A recovery tool must not have a dependency problem.
+
+    Format, matching werkzeug exactly:
+        pbkdf2:sha256:<iterations>$<salt>$<hex digest>
     """
-    try:
-        import werkzeug  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    venv_python = os.path.join(HERE, ".venv", "bin", "python")
-    if os.path.exists(venv_python) and os.path.realpath(venv_python) != os.path.realpath(sys.executable):
-        os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
-
-    sys.exit(
-        "werkzeug is not installed for this interpreter, and no .venv was found.\n"
-        "Run ./start-local.sh once to create it, then try again."
+    iterations = 600_000
+    salt = "".join(SALT_ALPHABET[b % len(SALT_ALPHABET)] for b in os.urandom(16))
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
     )
+    return f"pbkdf2:sha256:{iterations}${salt}${digest.hex()}"
 
 
 def connect():
@@ -99,13 +99,11 @@ def reset(conn, email, password):
     if len(password) < MIN_PASSWORD:
         sys.exit(f"password must be at least {MIN_PASSWORD} characters (the app enforces this)")
 
-    from werkzeug.security import generate_password_hash
-
     # Reactivate too: a suspended account rejects a correct password, which is
     # indistinguishable from a wrong one at the login screen.
     conn.execute(
         "UPDATE users SET password_hash = ?, status = 'active' WHERE id = ?",
-        (generate_password_hash(password), row["id"]),
+        (hash_password(password), row["id"]),
     )
     conn.commit()
     print(f"  password reset for {email}" + ("  (account re-activated)" if row["status"] != "active" else ""))
@@ -121,10 +119,6 @@ def main():
     ap.add_argument("--reset", metavar="EMAIL", help="set a new password for this account")
     ap.add_argument("--password", help="new password (omit to be prompted)")
     args = ap.parse_args()
-
-    if args.reset:
-        # Only the reset path needs werkzeug; listing works on any interpreter.
-        ensure_werkzeug()
 
     conn = connect()
     try:
