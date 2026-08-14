@@ -4,6 +4,7 @@ import { apiJson } from '../api';
 import {
   DIRECTION_LABEL,
   PRODUCTION_STREAK,
+  clean,
   directionFor,
   promptFor,
 } from '../reviewCards';
@@ -44,18 +45,18 @@ function AnswerBody({ item }: { item: ReviewItem }) {
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">You said</div>
           <div className="text-lg text-red-300 line-through decoration-red-500/50">
-            {d.learner_original || d.student_said || item.item_key}
+            {clean(d.learner_original) || clean(d.student_said) || item.item_key}
           </div>
         </div>
         <div>
           <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Correct</div>
           <div className="text-2xl text-emerald-300">
-            {d.teacher_correction || d.correct_form || '—'}
+            {clean(d.teacher_correction) || clean(d.correct_form) || '—'}
           </div>
         </div>
-        {(d.reason || d.explanation) && (
+        {(clean(d.reason) || clean(d.explanation)) && (
           <p className="text-sm text-gray-400 border-t border-gray-800 pt-3">
-            {d.reason || d.explanation}
+            {clean(d.reason) || clean(d.explanation)}
           </p>
         )}
       </div>
@@ -68,23 +69,23 @@ function AnswerBody({ item }: { item: ReviewItem }) {
   const produce = directionFor(item) === 'production';
 
   if (item.item_type === 'key_sentence') {
-    const zh = d.zh || item.item_key;
+    const zh = clean(d.zh) || item.item_key;
     return (
       <div className="space-y-2">
         {produce ? (
           <>
             <div className="text-2xl">{zh}</div>
-            {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
-            {d.en && (
+            {clean(d.pinyin) && <div className="text-sm text-gray-400">{d.pinyin}</div>}
+            {clean(d.en) && (
               <div className="text-base text-gray-300 border-t border-gray-800 pt-2">{d.en}</div>
             )}
           </>
         ) : (
           <>
-            <div className="text-2xl text-gray-100">{d.en || '—'}</div>
+            <div className="text-2xl text-gray-100">{clean(d.en) || '—'}</div>
             <div className="border-t border-gray-800 pt-2">
               <div className="text-lg text-gray-300">{zh}</div>
-              {d.pinyin && <div className="text-sm text-gray-500">{d.pinyin}</div>}
+              {clean(d.pinyin) && <div className="text-sm text-gray-500">{d.pinyin}</div>}
             </div>
           </>
         )}
@@ -92,11 +93,11 @@ function AnswerBody({ item }: { item: ReviewItem }) {
     );
   }
 
-  const term = d.term_zh || item.item_key;
-  const example = d.example_zh && (
+  const term = clean(d.term_zh) || item.item_key;
+  const example = clean(d.example_zh) && (
     <div className="border-t border-gray-800 pt-2 text-sm text-gray-400">
       <div>{d.example_zh}</div>
-      {d.example_en && <div className="text-gray-500">{d.example_en}</div>}
+      {clean(d.example_en) && <div className="text-gray-500">{d.example_en}</div>}
     </div>
   );
 
@@ -105,15 +106,15 @@ function AnswerBody({ item }: { item: ReviewItem }) {
       {produce ? (
         <>
           <div className="text-3xl">{term}</div>
-          {d.pinyin && <div className="text-sm text-gray-400">{d.pinyin}</div>}
-          {d.en && <div className="text-lg text-gray-300">{d.en}</div>}
+          {clean(d.pinyin) && <div className="text-sm text-gray-400">{d.pinyin}</div>}
+          {clean(d.en) && <div className="text-lg text-gray-300">{d.en}</div>}
         </>
       ) : (
         <>
-          <div className="text-2xl text-gray-100">{d.en || '—'}</div>
+          <div className="text-2xl text-gray-100">{clean(d.en) || '—'}</div>
           <div className="border-t border-gray-800 pt-2">
             <div className="text-3xl text-gray-300">{term}</div>
-            {d.pinyin && <div className="text-sm text-gray-500">{d.pinyin}</div>}
+            {clean(d.pinyin) && <div className="text-sm text-gray-500">{d.pinyin}</div>}
           </div>
         </>
       )}
@@ -157,6 +158,13 @@ export default function ReviewPage() {
       setDone({ streak: queue?.streak ?? 0, daily_target: queue?.daily_target ?? 0, target_increased: false, last_completed_on: '' });
     }
   }, [queue]);
+
+  const goBack = useCallback(() => {
+    if (index === 0) return;
+    setIndex(i => i - 1);
+    // Reveal it: you went back to look at something, not to be quizzed again.
+    setRevealed(true);
+  }, [index]);
 
   const grade = useCallback(
     async (value: 'again' | 'good') => {
@@ -322,6 +330,19 @@ export default function ReviewPage() {
           </button>
         </div>
       )}
+
+      {/* Going back was impossible: a mis-tap graded the card and moved on with
+          no way to re-read it. The grade already sent stands — re-grading from
+          here simply overwrites it, which is the behaviour you want anyway. */}
+      <div className="flex justify-center pt-1">
+        <button
+          onClick={goBack}
+          disabled={index === 0}
+          className="text-sm text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:hover:text-gray-500 transition-colors py-2 px-3"
+        >
+          ← Previous card
+        </button>
+      </div>
     </div>
   );
 }

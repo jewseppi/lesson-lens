@@ -66,7 +66,9 @@ class TestQueue:
 
     def test_time_box_bounds_the_queue(self, client, user_token, db, regular_user):
         _seed_items(db, regular_user["id"], [
-            ("2026-08-05", "vocab", f"term-{i}", {"term_zh": f"term-{i}"}) for i in range(40)
+            # Needs a meaning: an item with no answer side is not served at all.
+            ("2026-08-05", "vocab", f"term-{i}", {"term_zh": f"term-{i}", "en": f"meaning {i}"})
+            for i in range(40)
         ])
         five = client.get("/api/review/queue?minutes=5", headers=_auth(user_token)).get_json()
         assert five["count"] == rs.DEFAULT_DAILY_TARGET
@@ -247,3 +249,70 @@ class TestSettings:
         body = client.get("/api/review/queue", headers=_auth(user_token)).get_json()
         assert "term-one" not in [i["item_key"] for i in body["items"]]
         assert body["total_items"] == 2
+
+
+class TestUnusableItemsAreSkipped:
+    """Older summaries carry a Chinese sentence with no translation and a pinyin
+    of "n/a". Serving those produces a card whose reveal is a dash — nothing to
+    recall, and no way to tell whether you got it right."""
+
+    def test_sentence_without_translation_is_not_served(
+        self, client, user_token, db, regular_user
+    ):
+        _seed_items(db, regular_user["id"], [
+            ("2026-04-22", "key_sentence", "因為對我來說，味道有一點重",
+             {"zh": "因為對我來說，味道有一點重", "pinyin": "n/a", "en": ""}),
+            ("2026-04-22", "key_sentence", "雨停了",
+             {"zh": "雨停了", "pinyin": "yu3 ting2 le", "en": "The rain stopped."}),
+        ])
+        body = client.get("/api/review/queue", headers=_auth(user_token)).get_json()
+        keys = [i["item_key"] for i in body["items"]]
+        assert "雨停了" in keys
+        assert "因為對我來說，味道有一點重" not in keys, "a card with no answer must not be served"
+        assert body["total_items"] == 1, "and must not count toward the daily target"
+
+    @pytest.mark.parametrize("placeholder", ["", "n/a", "N/A", "-", "—", "none", "null"])
+    def test_placeholder_translations_count_as_missing(
+        self, client, user_token, db, regular_user, placeholder
+    ):
+        _seed_items(db, regular_user["id"], [
+            ("2026-04-22", "key_sentence", f"sentence-{placeholder or 'blank'}",
+             {"zh": "有一點重", "pinyin": "n/a", "en": placeholder}),
+        ])
+        body = client.get("/api/review/queue", headers=_auth(user_token)).get_json()
+        assert body["total_items"] == 0
+
+    def test_vocab_needs_a_meaning_or_an_example(
+        self, client, user_token, db, regular_user
+    ):
+        _seed_items(db, regular_user["id"], [
+            ("2026-04-22", "vocab", "bare", {"term_zh": "重", "pinyin": "zhong4", "en": "n/a"}),
+            ("2026-04-22", "vocab", "with-example",
+             {"term_zh": "味道", "pinyin": "wei4dao4", "en": "", "example_zh": "味道有一點重"}),
+            ("2026-04-22", "vocab", "with-meaning", {"term_zh": "城市", "en": "city"}),
+        ])
+        body = client.get("/api/review/queue", headers=_auth(user_token)).get_json()
+        keys = {i["item_key"] for i in body["items"]}
+        assert keys == {"with-example", "with-meaning"}
+
+    def test_correction_needs_the_corrected_form(
+        self, client, user_token, db, regular_user
+    ):
+        _seed_items(db, regular_user["id"], [
+            ("2026-04-22", "correction", "no-fix",
+             {"learner_original": "我是很好", "teacher_correction": ""}),
+            ("2026-04-22", "correction", "has-fix",
+             {"learner_original": "我是很好", "teacher_correction": "我很好"}),
+        ])
+        body = client.get("/api/review/queue", headers=_auth(user_token)).get_json()
+        assert [i["item_key"] for i in body["items"]] == ["has-fix"]
+
+    def test_stats_agree_with_the_queue(self, client, user_token, db, regular_user):
+        """A due count that includes unservable cards is a target you can't hit."""
+        _seed_items(db, regular_user["id"], [
+            ("2026-04-22", "key_sentence", "broken", {"zh": "重", "pinyin": "n/a", "en": ""}),
+            ("2026-04-22", "key_sentence", "fine", {"zh": "雨停了", "en": "It stopped."}),
+        ])
+        stats = client.get("/api/review/stats", headers=_auth(user_token)).get_json()
+        assert stats["total_items"] == 1
+        assert stats["due_count"] == 1

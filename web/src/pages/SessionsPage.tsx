@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiJson, apiFetch } from '../api';
+import { defaultMonth, monthsOf } from '../sessionMonths';
 import type { Session, SharedLink } from '../types';
 
 export default function SessionsPage() {
@@ -8,12 +9,19 @@ export default function SessionsPage() {
   const [loading, setLoading] = useState(true);
   const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
+  // Deliberately NOT the current month. Defaulting there showed an empty list
+  // whenever the newest lesson predated today's month — and since no <option>
+  // carried that value, the select *displayed* the newest month while filtering
+  // on a different one. It read as "my data is gone", and the only way out was
+  // picking another month and coming back.
+  const [selectedMonth, setSelectedMonth] = useState('');
 
   useEffect(() => {
     apiJson<Session[]>('/api/sessions')
-      .then(setSessions)
+      .then(data => {
+        setSessions(data);
+        setSelectedMonth(defaultMonth(data));
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -46,8 +54,7 @@ export default function SessionsPage() {
   const activeSessions = sessions.filter(s => !s.is_archived);
   const archivedSessions = sessions.filter(s => s.is_archived);
 
-  // Available months from active sessions (descending)
-  const availableMonths = [...new Set(activeSessions.map(s => s.date.slice(0, 7)))].sort().reverse();
+  const availableMonths = monthsOf(sessions);
 
   // Filter by selected month + text search
   const searchFiltered = activeSessions.filter(s => {

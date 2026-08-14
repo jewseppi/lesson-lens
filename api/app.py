@@ -3802,8 +3802,41 @@ def _candidate_review_items(conn, user_id):
             item["data"] = json.loads(item.pop("item_data_json") or "{}")
         except (ValueError, TypeError):
             item["data"] = {}
+        if not _item_is_reviewable(item):
+            continue
         items.append(item)
     return items
+
+
+# Placeholders older generations wrote where a value was missing. Treated as
+# absent, not as content — a card whose answer reads "n/a" teaches nothing.
+_EMPTY_VALUES = {"", "-", "—", "n/a", "N/A", "na", "none", "None", "null", "unknown"}
+
+
+def _present(value):
+    return isinstance(value, str) and value.strip() not in _EMPTY_VALUES
+
+
+def _item_is_reviewable(item):
+    """Does this item have both a question and an answer?
+
+    Some summaries — particularly older ones — carry a Chinese sentence with no
+    translation and a pinyin of "n/a". Serving those produces a card whose
+    reveal is a dash: nothing to recall, nothing to check yourself against, and
+    no way to tell whether you got it right. They are silently skipped rather
+    than counted toward the daily target.
+    """
+    data = item.get("data") or {}
+    if item["item_type"] == "correction":
+        return _present(data.get("teacher_correction") or data.get("correct_form"))
+    if item["item_type"] == "key_sentence":
+        return _present(data.get("zh")) and _present(data.get("en"))
+    # Vocabulary: the term plus at least a meaning or a worked example.
+    return _present(data.get("term_zh") or data.get("term")) and (
+        _present(data.get("en"))
+        or _present(data.get("meaning"))
+        or _present(data.get("example_zh"))
+    )
 
 
 @app.route("/api/review/queue", methods=["GET"])

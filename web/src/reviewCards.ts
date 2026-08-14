@@ -23,6 +23,23 @@ export const DIRECTION_LABEL: Record<CardDirection, string> = {
   production: 'Produce',
 };
 
+/** Placeholders older generations wrote where a value was missing.
+ *
+ * "n/a" rendered as if it were pinyin, and an empty translation rendered as a
+ * dash — a card that reveals nothing and cannot be self-checked. Treat them as
+ * absent everywhere.
+ */
+const EMPTY_VALUES = new Set(['', '-', '—', 'n/a', 'N/A', 'na', 'none', 'None', 'null', 'unknown']);
+
+export function present(value: string | undefined | null): value is string {
+  return typeof value === 'string' && !EMPTY_VALUES.has(value.trim());
+}
+
+/** The value if it is real content, otherwise undefined. */
+export function clean(value: string | undefined | null): string | undefined {
+  return present(value) ? value.trim() : undefined;
+}
+
 export function directionFor(item: Pick<ReviewItem, 'streak'>): CardDirection {
   return (item.streak ?? 0) >= PRODUCTION_STREAK ? 'production' : 'recognition';
 }
@@ -35,12 +52,16 @@ export function promptFor(item: ReviewItem): string {
   // been?", which is production whichever way you turn it; reversing it would
   // mean showing the right answer and asking what you got wrong.
   if (item.item_type === 'correction') {
-    return d.learner_original || d.student_said || item.item_key;
+    return clean(d.learner_original) || clean(d.student_said) || item.item_key;
   }
 
   const produce = directionFor(item) === 'production';
   if (item.item_type === 'key_sentence') {
-    return produce ? d.en || d.zh || item.item_key : d.zh || item.item_key;
+    return produce
+      ? clean(d.en) || clean(d.zh) || item.item_key
+      : clean(d.zh) || item.item_key;
   }
-  return produce ? d.en || d.term_zh || item.item_key : d.term_zh || item.item_key;
+  return produce
+    ? clean(d.en) || clean(d.term_zh) || item.item_key
+    : clean(d.term_zh) || item.item_key;
 }
