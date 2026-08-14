@@ -17,8 +17,33 @@ import os
 import sqlite3
 import sys
 
-DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api", "lessonlens.db")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DB = os.path.join(HERE, "api", "lessonlens.db")
 MIN_PASSWORD = 16
+
+
+def ensure_werkzeug():
+    """Re-run under the project virtualenv if this interpreter lacks werkzeug.
+
+    Password hashing has to produce exactly the format the app verifies, so it
+    has to be werkzeug's — and werkzeug lives in .venv, not in the system
+    python people naturally reach for. Rather than fail with ModuleNotFoundError
+    after already prompting for a password, switch interpreters up front.
+    """
+    try:
+        import werkzeug  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    venv_python = os.path.join(HERE, ".venv", "bin", "python")
+    if os.path.exists(venv_python) and os.path.realpath(venv_python) != os.path.realpath(sys.executable):
+        os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
+
+    sys.exit(
+        "werkzeug is not installed for this interpreter, and no .venv was found.\n"
+        "Run ./start-local.sh once to create it, then try again."
+    )
 
 
 def connect():
@@ -74,7 +99,6 @@ def reset(conn, email, password):
     if len(password) < MIN_PASSWORD:
         sys.exit(f"password must be at least {MIN_PASSWORD} characters (the app enforces this)")
 
-    sys.path.insert(0, os.path.join(os.path.dirname(DB)))
     from werkzeug.security import generate_password_hash
 
     # Reactivate too: a suspended account rejects a correct password, which is
@@ -97,6 +121,10 @@ def main():
     ap.add_argument("--reset", metavar="EMAIL", help="set a new password for this account")
     ap.add_argument("--password", help="new password (omit to be prompted)")
     args = ap.parse_args()
+
+    if args.reset:
+        # Only the reset path needs werkzeug; listing works on any interpreter.
+        ensure_werkzeug()
 
     conn = connect()
     try:
