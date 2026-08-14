@@ -337,6 +337,28 @@ else:
     )
     conn.commit()
     print(f"  created account: {email}")
+    row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+
+# Whoever .env names is who the updater and MCP server authenticate as. If that
+# account is empty while another one holds the lessons, the next sync lands in
+# the wrong place and the data ends up split in two — worse than either half.
+# Nobody would think to check for this, so say it unprompted.
+def owned(uid):
+    return conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (uid,)
+    ).fetchone()[0]
+
+mine = owned(row["id"]) if row else 0
+if mine == 0:
+    others = [
+        (r["email"], owned(r["id"]))
+        for r in conn.execute("SELECT id, email FROM users WHERE email != ?", (email,))
+    ]
+    richest = max(others, key=lambda t: t[1], default=None)
+    if richest and richest[1] > 0:
+        print(f"\033[33m  ! '{email}' has no sessions, but '{richest[0]}' has {richest[1]}.\033[0m")
+        print(f"\033[33m    Syncing now would land in the empty one. Point everything at it:\033[0m")
+        print(f"\033[33m      python3 account.py --use {richest[0]}\033[0m")
 conn.close()
 PYEOF
 

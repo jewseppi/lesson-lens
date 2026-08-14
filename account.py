@@ -8,6 +8,7 @@ SQLite file on this machine — it cannot reach a hosted instance.
     python3 account.py                     list accounts and what they own
     python3 account.py --reset a@b.com     set a new password (prompts)
     python3 account.py --reset a@b.com --password 'sixteen-plus-chars'
+    python3 account.py --use a@b.com       reset it AND point .env at it
 
 Run it from the repo root.
 """
@@ -22,6 +23,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "api", "lessonlens.db")
 MIN_PASSWORD = 16
+# reset() prompts when no password is passed; use() needs the value it settled on.
+RESOLVED = {}
 SALT_ALPHABET = string.ascii_letters + string.digits
 
 
@@ -88,7 +91,7 @@ def list_accounts(conn):
     print("\nData is scoped per account: logging in as one shows nothing owned by another.")
 
 
-def reset(conn, email, password):
+def reset(conn, email, password, quiet_env_hint=False):
     row = conn.execute("SELECT id, status FROM users WHERE email = ?", (email,)).fetchone()
     if not row:
         emails = [r["email"] for r in conn.execute("SELECT email FROM users")]
@@ -107,22 +110,74 @@ def reset(conn, email, password):
     )
     conn.commit()
     print(f"  password reset for {email}" + ("  (account re-activated)" if row["status"] != "active" else ""))
+    RESOLVED["password"] = password
     print(f"  log in at your local app with {email} and the new password")
-    print("\n  If you use this account for the updater, put it in .env too:")
-    print(f"    LESSONLENS_EMAIL={email}")
-    print( "    LESSONLENS_PASSWORD=<the password you just set>")
+    if not quiet_env_hint:
+        print("\n  To make the updater and MCP server use this account too:")
+        print(f"    python3 account.py --use {email}")
+
+
+ENV = os.path.join(HERE, ".env")
+
+
+def rewrite_env(email, password):
+    """Point .env at this account, preserving everything else in the file.
+
+    The updater and the MCP server authenticate as whoever .env names. Leaving
+    that pointed at a different account than the one holding your lessons means
+    the next sync quietly lands in an empty account — the data is not lost, but
+    it is split in two, which is worse than either half.
+    """
+    lines = []
+    if os.path.exists(ENV):
+        with open(ENV, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+
+    wanted = {"LESSONLENS_EMAIL": email, "LESSONLENS_PASSWORD": password}
+    seen = set()
+    out = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.strip().startswith("#") else None
+        if key in wanted:
+            out.append(f"{key}={wanted[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    for key, value in wanted.items():
+        if key not in seen:
+            out.append(f"{key}={value}")
+
+    with open(ENV, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    os.chmod(ENV, 0o600)
+    print(f"  .env now points at {email}")
+
+
+def use(conn, email, password):
+    """Make this the account everything uses: reset its password, update .env."""
+    reset(conn, email, password, quiet_env_hint=True)
+    password = RESOLVED["password"]
+    row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    counts = counts_for(conn, row["id"])
+    rewrite_env(email, password)
+    print(f"  it holds {counts['sessions']} session(s), {counts['summaries']} summary(ies)")
+    print("\n  Restart so the app picks it up:  ./start-local.sh")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", metavar="EMAIL", help="set a new password for this account")
+    ap.add_argument("--use", metavar="EMAIL",
+                    help="set its password AND point .env at it (the updater and MCP server follow)")
     ap.add_argument("--password", help="new password (omit to be prompted)")
     args = ap.parse_args()
 
     conn = connect()
     try:
-        if args.reset:
+        if args.use:
+            use(conn, args.use, args.password)
+        elif args.reset:
             reset(conn, args.reset, args.password)
         else:
             list_accounts(conn)
