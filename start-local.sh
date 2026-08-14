@@ -11,6 +11,7 @@
 #   ./start-local.sh           start (or restart) everything
 #   ./start-local.sh --stop    stop the server
 #   ./start-local.sh --logs    follow the server log
+#   ./start-local.sh --import <backup.zip>   also load a backup into it
 #   ./start-local.sh --status  is it running, and where?
 #   ./start-local.sh --no-git  don't switch branches or pull
 #
@@ -136,17 +137,32 @@ show_status() {
 }
 
 NO_GIT=0
-for arg in "$@"; do
-  case "$arg" in
+IMPORT_ZIP=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --stop)   bold "Stopping LessonLens"; stop_server; exit 0 ;;
     --logs)   exec tail -f "$LOGFILE" ;;
     --status) show_status; exit 0 ;;
     --no-git) NO_GIT=1 ;;
+    --import)
+      shift
+      IMPORT_ZIP="${1:-}"
+      [ -n "$IMPORT_ZIP" ] || die "--import needs a path to a backup zip"
+      # Resolve now: the script cds into the repo, and a relative path given
+      # from somewhere else would silently stop existing.
+      case "$IMPORT_ZIP" in
+        /*) ;;
+        ~*) IMPORT_ZIP="${IMPORT_ZIP/#\~/$HOME}" ;;
+        *)  IMPORT_ZIP="$PWD/$IMPORT_ZIP" ;;
+      esac
+      [ -f "$IMPORT_ZIP" ] || die "no such file: $IMPORT_ZIP"
+      ;;
     -h|--help)
-      sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '3,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) die "unknown option: $arg (try --help)" ;;
+    *) die "unknown option: $1 (try --help)" ;;
   esac
+  shift
 done
 
 bold "LessonLens — local setup in $REPO"
@@ -358,6 +374,37 @@ if [ "${READY:-0}" != "1" ]; then
   exit 1
 fi
 info "server ready at http://127.0.0.1:$PORT"
+
+# --- load data ------------------------------------------------------------
+# Merge only: anything already present is skipped, never overwritten, and the
+# server takes a restore point before it writes.
+if [ -n "$IMPORT_ZIP" ]; then
+  echo
+  bold "Loading $(basename "$IMPORT_ZIP")"
+  TOKEN="$(curl -fsS -X POST "http://127.0.0.1:$PORT/api/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$LESSONLENS_EMAIL\",\"password\":\"$LESSONLENS_PASSWORD\"}" \
+    | "$PY" -c 'import sys,json; print(json.load(sys.stdin)["access_token"])' || true)"
+  if [ -z "$TOKEN" ]; then
+    warn "could not log in as $LESSONLENS_EMAIL — skipping the import"
+  else
+    curl -fsS -X POST "http://127.0.0.1:$PORT/api/backup/import" \
+      -H "Authorization: Bearer $TOKEN" \
+      -F "replace_existing=false" -F "file=@$IMPORT_ZIP" \
+      | "$PY" -c '
+import sys, json
+d = json.load(sys.stdin)
+print("    imported %s session(s), %s summary(ies)"
+      % (d.get("session_count", 0), d.get("summary_count", 0)))
+if d.get("skipped_session_count"):
+    print("    skipped %s already present (merge never overwrites)"
+          % d["skipped_session_count"])
+if d.get("message"):
+    print("    %s" % d["message"])' || warn "import failed — the app is still running"
+    curl -fsS "http://127.0.0.1:$PORT/api/sessions" -H "Authorization: Bearer $TOKEN" \
+      | "$PY" -c 'import sys,json; print("    you now have %s session(s)" % len(json.load(sys.stdin)))' || true
+  fi
+fi
 
 # --- preflight ------------------------------------------------------------
 echo
