@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiJson } from '../api';
+import { recentOrNewest } from '../sessionMonths';
 import type { ReviewStats, Session, SharedLink, Upload } from '../types';
 
 export default function DashboardPage() {
@@ -25,10 +26,8 @@ export default function DashboardPage() {
     }).finally(() => setLoading(false));
   }, []);
 
-  const recentSessions = useMemo(
-    () => sessions
-      .filter(s => !s.is_archived && s.date >= recentCutoff)
-      .sort((a, b) => b.date.localeCompare(a.date) || b.start_time.localeCompare(a.start_time)),
+  const { sessions: recentSessions, isFallback } = useMemo(
+    () => recentOrNewest(sessions, recentCutoff),
     [sessions, recentCutoff],
   );
 
@@ -83,13 +82,38 @@ export default function DashboardPage() {
       )}
 
       {/* Recent sessions */}
-      {recentSessions.length > 0 && (
+      {recentSessions.length > 0 ? (
         <div>
-          <p className="text-sm text-gray-500 mb-3">{recentSessions.length} session{recentSessions.length !== 1 ? 's' : ''}</p>
+          <p className="text-sm text-gray-500 mb-3">
+            {isFallback
+              ? `No lessons in the last 2 weeks — showing your ${recentSessions.length} most recent`
+              : `${recentSessions.length} session${recentSessions.length !== 1 ? 's' : ''} in the past 2 weeks`}
+          </p>
           <div className="space-y-2">
             {recentSessions.map(s => <RecentSessionCard key={s.session_id} session={s} />)}
           </div>
+          {isFallback && (
+            <p className="text-sm text-gray-600 mt-3">
+              Newer lessons in LINE?{' '}
+              <Link to="/upload" className="text-indigo-400 hover:text-indigo-300">
+                Sync a chat export
+              </Link>{' '}
+              to bring them in.
+            </p>
+          )}
         </div>
+      ) : (
+        sessions.length > 0 && (
+          // Every session archived. Say so — a blank panel under a stat card
+          // reading "243 Total Sessions" looks like a bug, not a filter.
+          <p className="text-sm text-gray-500">
+            All {sessions.length} of your sessions are archived.{' '}
+            <Link to="/sessions" className="text-indigo-400 hover:text-indigo-300">
+              Browse them
+            </Link>
+            .
+          </p>
+        )
       )}
     </div>
   );
