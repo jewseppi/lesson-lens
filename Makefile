@@ -14,7 +14,8 @@ PORT ?= 5001
 .PHONY: run-local serve web-build update update-all update-dry update-sync-only update-agent push schedule unschedule doctor doctor-agent test help
 
 help:
-	@echo "./start-local.sh     Everything: deps, UI build, login, server, preflight (start here)"
+	@echo "./update-now.sh      Update code, start the app, sync your newest LINE export (start here)"
+	@echo "./start-local.sh     Everything but the sync: deps, UI build, login, server, preflight"
 	@echo "make run-local       Build the web UI, then start the app locally (foreground)"
 	@echo "make serve           Start the app only, on PORT (default $(PORT))"
 	@echo "make web-build       Build the web UI into web/dist (the app serves it)"

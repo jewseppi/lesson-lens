@@ -3,6 +3,27 @@
 Turns exported LINE/chat lesson transcripts into structured study packages:
 lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 
+## Update everything, in one command
+
+```bash
+cd ~/dev/language && git pull && ./update-now.sh
+```
+
+Reach for this one when you've just saved a fresh chat export out of LINE and
+want it in the app. It updates the code, starts the server, makes sure the
+tooling is pointed at the account that actually holds your lessons, finds your
+newest export, and syncs it — no flags, no decisions, safe to re-run. Existing
+sessions are never overwritten (re-running the same export imports nothing), and
+the server takes a restore point before it writes. It ends with a before/after
+session count, so a sync that added nothing looks different from one that did.
+
+The one step it can't do for you is the export itself — macOS LINE has no
+scripting hook. In LINE: open the lesson chat → chat menu (top right) → **Save
+chat history** → save the `.txt` to Downloads. Then run the command above.
+
+`--status`, `--stop`, and `--logs` are handed to `start-local.sh` and do only
+that — they never sync. `--no-git` skips the branch switch and pull.
+
 ## Run it locally
 
 ```bash

@@ -161,7 +161,10 @@ def use(conn, email, password):
     counts = counts_for(conn, row["id"])
     rewrite_env(email, password)
     print(f"  it holds {counts['sessions']} session(s), {counts['summaries']} summary(ies)")
-    print("\n  Restart so the app picks it up:  ./start-local.sh")
+    # No restart: the server authenticates against the database, so the new
+    # password works on the next login attempt. .env only tells the updater and
+    # the MCP server who to log in as, and they read it per run. Saying
+    # "restart" here sent people round a loop looking for a step that isn't one.
 
 
 def main():
