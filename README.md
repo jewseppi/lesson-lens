@@ -9,10 +9,11 @@ lesson summaries, flashcards, review exercises, and a mobile-friendly viewer.
 cd ~/dev/language && git pull && ./update-now.sh
 ```
 
-Reach for this one when you've just saved a fresh chat export out of LINE and
-want it in the app. It updates the code, starts the server, makes sure the
-tooling is pointed at the account that actually holds your lessons, finds your
-newest export, and syncs it — no flags, no decisions, safe to re-run. Existing
+Reach for this one when you've just saved a fresh chat export out of LINE, or
+when someone has handed you a summary archive to load. It updates the code,
+starts the server, points the tooling at the account that actually holds your
+lessons, loads any LessonLens `.zip` sitting in Downloads, and syncs your newest
+export — no flags, no decisions, safe to re-run. Existing
 sessions are never overwritten (re-running the same export imports nothing), and
 the server takes a restore point before it writes. It ends with a before/after
 session count, so a sync that added nothing looks different from one that did.

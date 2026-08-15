@@ -121,11 +121,22 @@ else
   # .env only tells the updater and the MCP server who to log in as.
 fi
 
-# --- 3. sync the newest export --------------------------------------------
+# --- 3. load any summary archive sitting in Downloads ---------------------
+# Summaries can arrive as a backup .zip rather than being generated here. If one
+# is sitting in Downloads, load it — merge semantics mean nothing is overwritten
+# and running twice imports nothing the second time, so this needs no prompt.
 echo
-bold "3/3  Syncing your newest LINE export"
+bold "3/4  Checking for a summary archive"
+# Capture the starting count here, before anything writes, so the before/after
+# line at the end covers the archive import as well as the chat sync. Taking it
+# after the import made a run that added 83 sessions report "83 -> 83".
 count_sessions() { "$PY" scripts/count_sessions.py 2>/dev/null || echo '?'; }
 before="$(count_sessions)"
+"$PY" scripts/import_backup.py || warn "the archive did not load — carrying on"
+
+# --- 4. sync the newest export --------------------------------------------
+echo
+bold "4/4  Syncing your newest LINE export"
 
 set +e
 LESSONLENS_TARGET=local "$PY" scripts/line_mac_sync.py --target local --generate-with none
