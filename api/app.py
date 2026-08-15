@@ -2127,6 +2127,13 @@ def _import_backup_bytes(raw_zip, replace_existing, email, *,
 
             imported_summaries = 0
             skipped_summary_count = 0
+            # Indexing is deferred to a second pass below rather than done inside
+            # this loop. install_summary_data opens its *own* connection to the
+            # same database, so interleaving writes on `conn` between those calls
+            # makes each one contend with a transaction this connection is
+            # holding — enough of them and SQLite's busy timeout expires with
+            # "database is locked", failing the whole restore.
+            to_index = []
             for session_id, lesson_data in summary_payloads.items():
                 if lesson_data.get("schema_version") != "lesson-data.v1":
                     continue
@@ -2172,7 +2179,16 @@ def _import_backup_bytes(raw_zip, replace_existing, email, *,
                     run_id=target_run_id,
                     user_id=user["id"],
                 )
+                to_index.append((session_id, lesson_data))
                 imported_summaries += 1
+
+            # Build the Daily Review cards. Without this the summaries arrive but
+            # Daily Review stays empty, which is indistinguishable from the
+            # import having silently failed. The generate path and the
+            # per-session summary import both index; restoring a backup has to
+            # leave the account in the same state they do.
+            for session_id, lesson_data in to_index:
+                _index_retrieval_items(conn, user["id"], session_id, lesson_data)
 
             imported_attachments, linked_attachments = _restore_backup_attachments(
                 conn, archive, manifest, user["id"]
