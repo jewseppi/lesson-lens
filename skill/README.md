@@ -5,11 +5,10 @@ source-faithful study pack — lesson summary, key sentences, vocabulary, the
 teacher's corrections, and spaced-repetition review assets (flashcards,
 fill-in-the-blank, translation drills, quiz) — as validated JSON.
 
-This is the portable, agent-ready distillation of the
-[lesson-lens](https://github.com/jewseppi/lesson-lens) project. The full project
-is a hosted app (Flask + React + SQLite + LINE sync); this skill is just the
-reusable core — the prompts, the schema, and a validator — with nothing to host
-and no database.
+This skill is the portable, agent-ready core of a larger language-lesson
+summarizer project (a hosted app built with Flask + React + SQLite and chat
+sync). The skill is just the reusable part — the prompts, the schema, and a
+validator — with nothing to host and no database.
 
 ## What makes it worth installing
 
@@ -70,5 +69,4 @@ skill/
 
 ## License / provenance
 
-Derived from lesson-lens by the same author. The example transcripts are
-synthetic — no real student data.
+The example transcripts are synthetic — no real student data.
