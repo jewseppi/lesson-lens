@@ -20,7 +20,7 @@ reviewer can see exactly what conventions a pack was built under.
 
 ## Why this replaces the old `language_mode`
 
-The original lesson-lens schema had a `language_mode` with a `script` enum of
+The original project's schema had a `language_mode` with a `script` enum of
 `traditional | simplified | both` and a field literally named `pinyin_policy`.
 That bakes Chinese into the data model. The same idea generalizes cleanly once
 the fields are named by *role*:
@@ -33,7 +33,7 @@ the fields are named by *role*:
 
 ## Ready-made profiles
 
-### Mandarin Chinese (the original lesson-lens behaviour)
+### Mandarin Chinese
 
 ```yaml
 target_language: "Mandarin Chinese"
@@ -42,6 +42,10 @@ reading_system: "pinyin-numeric"   # e.g. ni3 hao3
 reading_policy: "every_line"
 native_language: "English"
 ```
+
+> Numbered-pinyin convention: mark the neutral/light tone with `5` (e.g. 的
+> `de5`, 個 `ge5`, 嗎 `ma5`), so runs don't diverge between `5`, `0`, and no
+> number — reading consistency is one of the things the skill is selling.
 
 ### Japanese
 

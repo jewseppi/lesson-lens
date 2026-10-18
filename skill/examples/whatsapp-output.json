@@ -48,6 +48,7 @@
       "pos_or_type": "noun (feminine)",
       "example_target": "Hay una rebaja",
       "example_translation": "There's a sale.",
+      "example_is_composed": true,
       "source_refs": ["msg-0010"]
     }
   ],

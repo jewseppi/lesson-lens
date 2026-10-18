@@ -55,6 +55,7 @@
       "example_target": "這個很便宜",
       "example_reading": "zhe4 ge5 hen3 pian2 yi2",
       "example_translation": "This is cheap.",
+      "example_is_composed": true,
       "source_refs": ["msg-0009"]
     }
   ],

@@ -42,7 +42,7 @@
         },
         "reading_system": {
           "type": "string",
-          "description": "Pronunciation aid to attach to target-language text, e.g. 'pinyin', 'pinyin-numeric', 'romaji', 'furigana', 'revised-romanization', or 'none'."
+          "description": "Pronunciation aid to attach to target-language text, e.g. 'pinyin-numeric', 'pinyin-diacritic', 'romaji', 'furigana', 'revised-romanization', or 'none'."
         },
         "reading_policy": {
           "type": "string",
@@ -104,6 +104,10 @@
           "example_target": { "type": "string" },
           "example_reading": { "type": "string" },
           "example_translation": { "type": "string" },
+          "example_is_composed": {
+            "type": "boolean",
+            "description": "true when the example was composed rather than taken verbatim from the transcript. Composed examples must use only vocabulary from the lesson. Lets a reviewer trace composed material without parsing free-text flags."
+          },
           "frequency_tag": { "type": "string" },
           "difficulty": { "type": "string" },
           "related_terms": { "type": "array", "items": { "type": "string" } },
@@ -213,7 +217,11 @@
         "required": ["area", "level", "detail"],
         "properties": {
           "area": { "type": "string" },
-          "level": { "type": "string", "enum": ["high", "medium", "low"] },
+          "level": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "The model's confidence in the flagged item: 'low' = least confident and most in need of human review (same direction as key_sentences.confidence)."
+          },
           "detail": { "type": "string" },
           "source_refs": { "type": "array", "items": { "type": "string" } }
         }

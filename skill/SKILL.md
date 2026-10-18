@@ -91,8 +91,10 @@ For each session, produce, following the fidelity rules below:
   `translation` (native language), and `source_refs`.
 - **vocabulary** — new or reviewed words: `term`, `reading`, `translation`,
   `pos_or_type`, and an `example_target` + `example_translation`. Prefer an
-  example that actually appeared in the lesson; if you must compose one, keep it
-  within the lesson's vocabulary and flag it.
+  example that actually appeared in the lesson; if you must compose one (a lesson
+  often just drops a bare word), keep it within the lesson's vocabulary and set
+  `example_is_composed: true` on that entry so the composed material stays
+  traceable. Cite `source_refs` when the term maps to specific messages.
 - **corrections** — the highest-value items. For each: `learner_original` and
   `teacher_correction` **verbatim**, a short `reason`, and `source_refs`. If the
   teacher corrected it, capture it; this is what the learner got wrong and most
@@ -167,14 +169,19 @@ pay for this over a one-line prompt:
    item gets a translation.
 6. **Exclude non-lesson content.** Scheduling, greetings, media placeholders,
    and call notifications are noise.
-7. **Cite sources.** Every key sentence and correction references the message
-   ID(s) it came from, so the learner can trace it back.
+7. **Cite sources.** Every key sentence and correction must reference the
+   message ID(s) it came from, so the learner can trace it back. Vocabulary
+   should cite its source line(s) too where a term maps to specific messages
+   (best-effort — the validator enforces refs on key sentences and corrections,
+   not vocabulary).
 
 ## Output format
 
-Return the `lesson-data.v2` JSON object as the primary artifact (raw JSON, no
-markdown code fences if the host consumes it programmatically). One object per
-session; if a transcript held several lessons, produce several packs.
+Return the `lesson-data.v2` JSON object as the primary and only required output
+(raw JSON, no markdown code fences if the host consumes it programmatically). One
+object per session; if a transcript held several lessons, produce several packs.
+Markdown or Anki-CSV renders are optional and only when asked — the JSON is the
+source of truth.
 
 ## Reference files
 

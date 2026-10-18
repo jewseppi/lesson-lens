@@ -10,7 +10,7 @@ been exercised.
 
 | Format | Status | Notes |
 |---|---|---|
-| **LINE** (mobile + desktop export) | **Verified** | The original lesson-lens pipeline was built and run against real LINE exports end to end. Two shapes exist: mobile is tab-separated (`HH:MM⇥Speaker⇥Message`) under a `Mon, YYYY-MM-DD` date header; desktop is space-separated (`HH:MM Speaker Message`) under a `YYYY.MM.DD Weekday` header. |
+| **LINE** (mobile + desktop export) | **Verified** | The original project's pipeline was built and run against real LINE exports end to end. Two shapes exist: mobile is tab-separated (`HH:MM⇥Speaker⇥Message`) under a `Mon, YYYY-MM-DD` date header; desktop is space-separated (`HH:MM Speaker Message`) under a `YYYY.MM.DD Weekday` header. |
 | **WhatsApp** (`_chat.txt` export) | **Smoke-tested** | Parses in dry-runs against a synthetic sample. Not yet validated against a large corpus of real exports. See quirks below. |
 | **iMessage / pasted chat** | **Experimental** | The model adapts; validate the output against the schema before trusting it. |
 | **Zoom / Otter / meeting transcript** | **Experimental** | Works in principle (speaker-labelled turns), untested. Expect weaker turn attribution. |
