@@ -4,17 +4,16 @@ description: >-
   Turn an exported or pasted language-tutoring chat or lesson transcript into a
   structured, source-faithful study pack: a lesson summary, key sentences,
   vocabulary, the teacher's corrections, and spaced-repetition review assets
-  (flashcards, fill-in-the-blank, translation drills, and a quiz), emitted as
-  validated JSON. Works for any target language and any native language through
-  a small language profile, and handles romanization/reading systems like
-  pinyin, romaji, or furigana — or none at all for languages that don't need
-  one. Use this whenever someone wants to review a language lesson, convert a
-  tutor or chat log (LINE, WhatsApp, iMessage, a Zoom/Otter transcript, or
-  pasted text) into study notes or Anki cards, pull out the vocabulary and the
-  corrections their teacher made, or build review exercises from a conversation
-  with a teacher — even if they don't use the words "study pack". The defining
-  promise is fidelity: nothing is invented, corrections are preserved verbatim,
-  and every item points back to the line it came from.
+  (flashcards, fill-in-the-blank, translation drills, and a quiz) as validated
+  JSON. Works for any target language and any native language via a small
+  language profile, and handles readings like pinyin, romaji, or furigana — or
+  none for languages that don't need one. Use whenever someone wants to review a
+  language lesson, convert a tutor or chat log (LINE, WhatsApp, iMessage, a
+  Zoom/Otter transcript, or pasted text) into study notes or Anki cards, pull
+  out the vocabulary and corrections their teacher made, or build review
+  exercises from a conversation with a teacher — even if they don't say "study
+  pack". The defining promise is fidelity: nothing invented, corrections kept
+  verbatim, every item traceable to its source line.
 ---
 
 # Language Lesson Study Pack
