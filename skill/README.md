@@ -5,10 +5,14 @@ source-faithful study pack — lesson summary, key sentences, vocabulary, the
 teacher's corrections, and spaced-repetition review assets (flashcards,
 fill-in-the-blank, translation drills, quiz) — as validated JSON.
 
-This skill is the portable, agent-ready core of a larger language-lesson
-summarizer project (a hosted app built with Flask + React + SQLite and chat
-sync). The skill is just the reusable part — the prompts, the schema, and a
-validator — with nothing to host and no database.
+This skill is the portable, agent-ready core of **LessonLens**, an open-source
+language-lesson study-pack project (a hosted app built with Flask + React +
+SQLite, with chat sync, a web viewer, and spaced-repetition review). The skill is
+just the reusable part — the prompts, the schema, and a validator — with nothing
+to host and no database.
+
+**Full project & source:** https://github.com/jewseppi/lesson-lens — if this
+skill is useful, the complete app is there, and a star is appreciated.
 
 ## What makes it worth installing
 

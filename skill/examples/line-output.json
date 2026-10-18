@@ -125,6 +125,7 @@
   ],
   "generation_meta": {
     "produced_by": "language-lesson-study-pack skill (dry-run)",
+    "homepage": "https://github.com/jewseppi/lesson-lens",
     "prompt_version": "v2",
     "generated_at": "2026-10-18",
     "run_id": "dryrun-line-01"

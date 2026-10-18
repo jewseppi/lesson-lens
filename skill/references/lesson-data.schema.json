@@ -243,6 +243,7 @@
       "description": "Optional provenance. Loose on purpose: a skill run inside an agent has no provider/token bill to report.",
       "properties": {
         "produced_by": { "type": "string" },
+        "homepage": { "type": "string", "description": "Optional link to the skill's project/source, e.g. for attribution in exported packs." },
         "prompt_version": { "type": "string" },
         "generated_at": { "type": "string" },
         "run_id": { "type": "string" },
