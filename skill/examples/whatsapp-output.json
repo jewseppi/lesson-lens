@@ -1,0 +1,129 @@
+{
+  "schema_version": "lesson-data.v2",
+  "lesson_id": "2024-10-02",
+  "lesson_date": "2024-10-02",
+  "title": "Shopping: \"descuento\" and \"rebaja\", and dropping redundant pronouns",
+  "source_session_ids": ["2024-10-02"],
+  "language_profile": {
+    "target_language": "Spanish",
+    "script": null,
+    "reading_system": "none",
+    "reading_policy": "none",
+    "native_language": "English"
+  },
+  "summary": {
+    "overview": "A short Spanish lesson on shopping vocabulary. The teacher introduced \"el descuento\" (discount) and \"la rebaja\" (sale/markdown), and corrected the student's sentence by dropping the redundant subject pronoun and using a clitic object pronoun.",
+    "usage_notes": "Spanish normally omits subject pronouns like \"yo\" because the verb ending already carries the person. The clitic \"lo\" (\"it\") replaces a direct object instead of repeating it.",
+    "short_recap": "el descuento = discount; la rebaja = sale; say \"Quiero comprarlo con descuento\", not \"Yo quiero comprar este con descuento\"."
+  },
+  "key_sentences": [
+    {
+      "id": "ks-001",
+      "target": "Quiero comprarlo con descuento",
+      "translation": "I want to buy it with a discount.",
+      "source_refs": ["msg-0007"],
+      "context_note": "The teacher's corrected form of the student's sentence.",
+      "confidence": "high"
+    },
+    {
+      "id": "ks-002",
+      "target": "Hoy vamos a practicar las compras",
+      "translation": "Today we're going to practice shopping.",
+      "source_refs": ["msg-0004"],
+      "confidence": "high"
+    }
+  ],
+  "vocabulary": [
+    {
+      "term": "el descuento",
+      "translation": "discount",
+      "pos_or_type": "noun (masculine)",
+      "example_target": "Quiero comprarlo con descuento",
+      "example_translation": "I want to buy it with a discount.",
+      "source_refs": ["msg-0005", "msg-0007"]
+    },
+    {
+      "term": "la rebaja",
+      "translation": "sale; markdown; price reduction",
+      "pos_or_type": "noun (feminine)",
+      "example_target": "Hay una rebaja",
+      "example_translation": "There's a sale.",
+      "source_refs": ["msg-0010"]
+    }
+  ],
+  "corrections": [
+    {
+      "id": "corr-001",
+      "learner_original": "Yo quiero comprar este con descuento",
+      "teacher_correction": "Quiero comprarlo con descuento",
+      "reason": "Drop the redundant subject \"Yo\", and use the clitic pronoun \"lo\" instead of repeating \"este\".",
+      "source_refs": ["msg-0006", "msg-0007", "msg-0008"],
+      "pattern_tag": "pronouns"
+    }
+  ],
+  "review": {
+    "flashcards": [
+      { "id": "fc-001", "front": "el descuento", "back": "discount (noun, m.)" },
+      { "id": "fc-002", "front": "la rebaja", "back": "sale; markdown (noun, f.)" },
+      { "id": "fc-003", "front": "Quiero comprarlo con descuento", "back": "I want to buy it with a discount." }
+    ],
+    "fill_blank": [
+      {
+        "id": "fb-001",
+        "sentence": "Quiero comprar____ con descuento",
+        "blank_word": "lo",
+        "answer": "lo",
+        "hint": "clitic object pronoun meaning \"it\""
+      }
+    ],
+    "translation_drills": [
+      {
+        "id": "td-001",
+        "source_lang": "target",
+        "source_text": "Quiero comprarlo con descuento",
+        "target_text": "I want to buy it with a discount."
+      },
+      {
+        "id": "td-002",
+        "source_lang": "native",
+        "source_text": "There's a sale.",
+        "target_text": "Hay una rebaja."
+      }
+    ],
+    "quiz": [
+      {
+        "id": "q-001",
+        "question": "Why is \"Yo quiero comprar este con descuento\" corrected to \"Quiero comprarlo con descuento\"?",
+        "options": [
+          "\"Yo\" is redundant and \"lo\" replaces \"este\"",
+          "\"descuento\" is misspelled",
+          "\"quiero\" should be \"quieres\"",
+          "it is missing a question mark"
+        ],
+        "correct_index": 0,
+        "explanation": "Spanish usually drops the subject pronoun, and the clitic \"lo\" avoids repeating the object \"este\"."
+      },
+      {
+        "id": "q-002",
+        "question": "What does \"la rebaja\" mean?",
+        "options": ["the sale / markdown", "the receipt", "the cashier", "the refund"],
+        "correct_index": 0,
+        "explanation": "\"la rebaja\" is a price reduction or sale."
+      }
+    ]
+  },
+  "confidence_flags": [
+    {
+      "area": "vocabulary example (la rebaja)",
+      "level": "medium",
+      "detail": "The example sentence for \"la rebaja\" was composed; the teacher introduced the word without an example sentence of her own.",
+      "source_refs": ["msg-0010"]
+    }
+  ],
+  "generation_meta": {
+    "produced_by": "language-lesson-study-pack skill (dry-run)",
+    "prompt_version": "v2",
+    "generated_at": "2026-10-18",
+    "run_id": "dryrun-whatsapp-01"
+  }
+}

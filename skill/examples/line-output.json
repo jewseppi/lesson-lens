@@ -1,0 +1,131 @@
+{
+  "schema_version": "lesson-data.v2",
+  "lesson_id": "2024-09-24",
+  "lesson_date": "2024-09-24",
+  "title": "Shopping: discounts (打折) and \"cheap\" (便宜)",
+  "source_session_ids": ["2024-09-24"],
+  "language_profile": {
+    "target_language": "Mandarin Chinese",
+    "script": "traditional",
+    "reading_system": "pinyin-numeric",
+    "reading_policy": "every_line",
+    "native_language": "English"
+  },
+  "summary": {
+    "overview": "A short Mandarin lesson on shopping vocabulary. The teacher introduced 打折 (to give a discount) and 便宜 (cheap/inexpensive), and corrected the student's word order when asking for a price after a discount.",
+    "usage_notes": "打X折 states the fraction of the price you still pay: 打八折 literally \"take eight parts\" means you pay 80%, i.e. a 20% discount. 便宜 describes something inexpensive.",
+    "short_recap": "打折 = discount; 打八折 = 20% off; ask \"這個打折後多少錢?\" rather than \"這個多少錢打折?\"."
+  },
+  "key_sentences": [
+    {
+      "id": "ks-001",
+      "target": "這件衣服打八折",
+      "reading": "zhe4 jian4 yi1 fu2 da3 ba1 zhe2",
+      "translation": "This piece of clothing is 20% off.",
+      "source_refs": ["msg-0006"],
+      "context_note": "打八折 = pay 80% of the price = a 20% discount.",
+      "confidence": "high"
+    },
+    {
+      "id": "ks-002",
+      "target": "這個打折後多少錢?",
+      "reading": "zhe4 ge5 da3 zhe2 hou4 duo1 shao3 qian2",
+      "translation": "How much is this after the discount?",
+      "source_refs": ["msg-0008"],
+      "context_note": "The teacher's corrected form of the student's question.",
+      "confidence": "high"
+    }
+  ],
+  "vocabulary": [
+    {
+      "term": "打折",
+      "reading": "da3 zhe2",
+      "translation": "to give a discount; to be on sale",
+      "pos_or_type": "verb",
+      "example_target": "這件衣服打八折",
+      "example_reading": "zhe4 jian4 yi1 fu2 da3 ba1 zhe2",
+      "example_translation": "This piece of clothing is 20% off.",
+      "source_refs": ["msg-0004", "msg-0006"]
+    },
+    {
+      "term": "便宜",
+      "reading": "pian2 yi2",
+      "translation": "cheap; inexpensive",
+      "pos_or_type": "adjective",
+      "example_target": "這個很便宜",
+      "example_reading": "zhe4 ge5 hen3 pian2 yi2",
+      "example_translation": "This is cheap.",
+      "source_refs": ["msg-0009"]
+    }
+  ],
+  "corrections": [
+    {
+      "id": "corr-001",
+      "learner_original": "這個多少錢打折?",
+      "teacher_correction": "這個打折後多少錢?",
+      "reason": "Put 打折後 (\"after discounting\") before the price question; 打折 should not trail the sentence.",
+      "source_refs": ["msg-0007", "msg-0008"],
+      "pattern_tag": "word-order"
+    }
+  ],
+  "review": {
+    "flashcards": [
+      { "id": "fc-001", "front": "打折", "back": "da3 zhe2 — to give a discount; to be on sale" },
+      { "id": "fc-002", "front": "便宜", "back": "pian2 yi2 — cheap; inexpensive" },
+      { "id": "fc-003", "front": "這件衣服打八折", "back": "zhe4 jian4 yi1 fu2 da3 ba1 zhe2 — This piece of clothing is 20% off." }
+    ],
+    "fill_blank": [
+      {
+        "id": "fb-001",
+        "sentence": "這個____後多少錢?",
+        "blank_word": "打折",
+        "answer": "打折",
+        "hint": "the verb for giving a discount"
+      }
+    ],
+    "translation_drills": [
+      {
+        "id": "td-001",
+        "source_lang": "target",
+        "source_text": "這件衣服打八折",
+        "target_text": "This piece of clothing is 20% off."
+      },
+      {
+        "id": "td-002",
+        "source_lang": "native",
+        "source_text": "How much is it after the discount?",
+        "target_text": "這個打折後多少錢?"
+      }
+    ],
+    "quiz": [
+      {
+        "id": "q-001",
+        "question": "What does 打八折 mean?",
+        "options": ["20% off", "80% off", "8% off", "buy 8, get 1 free"],
+        "correct_index": 0,
+        "explanation": "打八折 means you pay 80% of the price, i.e. a 20% discount."
+      },
+      {
+        "id": "q-002",
+        "question": "Which is the natural way to ask the price after a discount?",
+        "options": ["這個多少錢打折?", "這個打折後多少錢?", "打折這個多少錢?"],
+        "correct_index": 1,
+        "explanation": "打折後 (\"after discounting\") comes before the price question."
+      }
+    ]
+  },
+  "confidence_flags": [
+    {
+      "area": "vocabulary example (便宜)",
+      "level": "medium",
+      "detail": "The example sentence for 便宜 was composed from in-lesson vocabulary; the teacher introduced the word without an example sentence of her own.",
+      "source_refs": ["msg-0009"]
+    }
+  ],
+  "generation_meta": {
+    "produced_by": "language-lesson-study-pack skill (dry-run)",
+    "prompt_version": "v2",
+    "generated_at": "2026-10-18",
+    "run_id": "dryrun-line-01"
+  }
+}
